@@ -1,0 +1,33 @@
+{
+  "name": "proofloom",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Local-first extensible proofreading and OCR restoration workspace",
+  "license": "MIT",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node --test tests/*.test.mjs",
+    "verify": "npm test && npm run build"
+  },
+  "dependencies": {
+    "@cspell/dict-en-common-misspellings": "2.2.0",
+    "@fontsource/dm-sans": "5.2.8",
+    "@fontsource/newsreader": "5.2.8",
+    "@tesseract.js-data/eng": "1.0.0",
+    "dictionary-en": "4.0.0",
+    "dictionary-en-gb": "3.0.0",
+    "jszip": "3.10.1",
+    "mammoth": "1.11.0",
+    "nspell": "2.1.5",
+    "pdfjs-dist": "4.10.38",
+    "tesseract.js": "6.0.1",
+    "tesseract.js-core": "6.0.0"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.5"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
