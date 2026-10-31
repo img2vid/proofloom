@@ -189,7 +189,7 @@ if(worker){
   worker.onmessage=({data})=>{
     if(data.id!==state.version)return;
     if(data.type==='result'){
-      state.localIssues=data.issues;state.checking=false;state.capped=data.capped;state.metrics=data.metrics;state.readability=data.readability||null;
+      state.localIssues=data.issues;state.checking=false;state.capped=data.capped;state.metrics=data.metrics;state.readability=data.readability||null;state.workerError=null;showEditorNotice();
       if(!state.selectedId||!data.issues.some(i=>i.id===state.selectedId))state.selectedId=data.issues[0]?.id;
       renderAssistant();renderHighlights();renderStats();$('#check-label')&&($('#check-label').textContent='Check text');
     }else if(data.type==='error'){state.checking=false;state.workerError=data.message;renderAssistant();showEditorNotice();toast('The local check could not finish: '+data.message,true);}
