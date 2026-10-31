@@ -1,177 +1,95 @@
-# Openmukti Audiobook Maker — Version 1.0.12
+# Proofloom
 
-**New: scanned-book OCR and English spelling review.** Import scanned/mixed PDFs,
-page images, multipage TIFFs and ZIP/CBZ image books with local Tesseract OCR,
-adaptive black-and-white preprocessing, contrast cleanup, deskew and orientation
-correction. Click underlined words for suggestions or use **Correct all OCR**
-with one-step undo. Book Studio includes a chapter spelling-review editor.
-See [OCR_AND_SPELLING.md](OCR_AND_SPELLING.md) for setup and Proofloom attribution.
+A complete, static proofreading and OCR restoration website designed for GitHub Pages. The default engine runs on the user's CPU in a browser worker. Documents stay in the browser unless the user explicitly requests a connected grammar check.
 
-**New: Complete project import/export (`.oamproj`) and character voices in every main-window export.** Choose File → Export entire project to bundle text, chapters, covers, narration files, profiles, pronunciation dictionaries, ONNX voices and settings into one portable archive; restore with File → Open entire project. See [COMPLETE_PROJECTS.md](COMPLETE_PROJECTS.md).
+## What ships
 
-![Openmukti Audiobook Maker logo](assets/openmukti-logo.png)
+- **7,300+ language rules and dialect variants** (counts are generated at build time and shown in the app): curated grammar, punctuation and style rules; a multi-pattern phrase matcher running thousands of literal rules through a single token scan; generated verb-form, plural, countability, article and collocation rules from linguistic tables; and ~5,000 British/American dialect spelling forms.
+- **57 registered algorithms** in six families: string metrics (Levenshtein, Damerau-Levenshtein, Jaro-Winkler, Dice, Monge-Elkan…), phonetics (Soundex, Refined Soundex, Metaphone, Double Metaphone, NYSIIS, Caverphone 1/2, Match Rating), candidate-generation models (Norvig deletion index, phonetic buckets, keyboard adjacency, OCR confusion, split/join), ranking (weighted edit distance, frequency priors), context analysis (confusion-set disambiguation), and text segmentation. The full registry with per-algorithm descriptions is in `src/core/algorithms/registry.js`.
+- **67,000+ spelling-correction mappings** from CSpell's common-misspellings data (US and GB variants), plus **810,000+ domain dictionary words** from 38 bundled CSpell dictionaries (software terms, companies, programming languages, cloud platforms, medical and scientific vocabulary, gaming, licenses and more), shipped gzipped and decompressed in the worker.
+- **Corpus-derived context model for real-word errors**: "their/there/they're"-style confusions are disambiguated by the surrounding words using before/after statistics mined from 3.7 million words of public-domain literature (32 Project Gutenberg classics), combined with grammatical pattern tests for 138 confusion sets.
+- **49,000 frequency-ranked words in each of 35 languages** (OpenSubtitles top-50k, CC BY-SA — one ranked list per bundled language that has one): every language's spelling suggestions are ranked by real corpus frequency with the same weighted scorer as English, not just dictionary order.
+- **Ten readability formulas** (Flesch Reading Ease, Flesch-Kincaid, Gunning Fog, SMOG, Coleman-Liau, ARI, Linsear Write, Dale-Chall, FORCAST, Spache) with Dale-Chall and Spache familiar-word lists, displayed in a readability panel.
+- **Sentence-level style analysis**: sentence-length variance, repeated sentence starts, adverb density, nominalization and weasel-word density, and a passive-voice detector — all review-only suggestions.
+- **36 bundled language dictionaries** (7 million+ Hunspell entries): Bulgarian, Catalan, Czech, Danish, German, Greek, Esperanto, Spanish, Estonian, Basque, Persian, French, Irish, Galician, Hebrew, Croatian, Hungarian, Icelandic, Italian, Korean, Lithuanian, Latvian, Norwegian Bokmål, Dutch, Norwegian Nynorsk, Polish, Portuguese, Romanian, Russian, Slovak, Slovenian, Serbian, Swedish, Turkish, Ukrainian, and Vietnamese — gzipped, loaded on demand for the document's language, with morphology-aware, frequency-ranked suggestions. American and British English remain fully bundled; Indian English uses the British dictionary and spelling policy.
+- Suggestions with explanations, alternatives, confidence estimates, ignore controls, personal words, individual rule disabling, safe bulk fixes, undo/redo, checkpoints, literal find/replace, focus mode, and reading statistics. **Click-to-correct in the editor**: click any highlighted word to open a correction popover anchored to that word and rewrite the text in place, with ignore, add-to-dictionary, and rule-disable actions.
+- Import of TXT, Markdown, HTML/XHTML, DOCX, ODT, basic RTF, EPUB, FB2, PDF, SRT/VTT, and images. EPUB follows the package spine; PDFs become one section per page. Whole-book review checks every section, produces a report, and can apply safe fixes with a checkpoint.
+- CPU-based English OCR with bundled Tesseract.js, WebAssembly cores, and trained data, plus OCR restoration suggestions for ligatures, soft hyphens, broken line-end words, letter/digit confusion, and merged/split letters.
+- New text-based TXT, Markdown, HTML, DOCX, and EPUB exports; browser printing for PDF.
+- Local browser persistence, document search, workspace backup/restore, runtime JSON rule packs, TXT/CSV/TSV/JSON wordlists, UTF-8 Hunspell pairs, and a source-code extension registry.
+- An optional, manually triggered LanguageTool-compatible server connection, with explicit sharing consent and visible failure reporting.
+- Responsive layout, keyboard controls, semantic controls, reduced-motion support, and a service worker for offline reuse.
 
-An open-source, offline-capable audiobook creation desktop app and CLI by **Aishik Dutta**, open-source developer. Version 1 adds character/narrator voice projects, sentence-level speaker tags, a language-organized Piper voice downloader, multilingual language detection, and audio-only **and** video audiobook exports. The project is MIT-licensed. Third-party voice binaries, models, and FFmpeg are separately licensed.
+All counts above are produced by the build (`scripts/build.mjs`) and displayed under **Dictionaries & languages** — they describe the shipped data, honestly.
 
+## Run locally
 
-## Inline IPA directly inside a story (no dictionary needed)
-
-In **any story editor, imported chapter, audio-only book, audiobook video, or Character Voices script**, put IPA between ordinary angle brackets. Openmukti synthesizes the IPA instead of reading it as text. It works in the same document as speaker tags:
-
-```text
-[Narrator] The sign read <həˈloʊ>.
-[Alice] The French greeting sounds like <bɔ̃ʒuʁ>!
-[Bob] I call the machine <ipa:ˈoʊpənmukti|open mukti>.
-[Narrator] We continued down the road.
-```
-
-- `<həˈloʊ>` means **speak these phonemes**, not the angle brackets.
-- `<ipa:həˈloʊ>` is the explicit form. Use this form for IPA written only with ordinary ASCII letters, such as `<ipa:kat>`, to avoid confusion with HTML tags.
-- `<ipa:həˈloʊ|hello>` adds an **optional ordinary-text fallback** for SAPI, eSpeak, macOS voices or Piper configurations without compatible phonemes. This text is not a phonetic-accuracy guarantee.
-- `<ipa:/həˈloʊ/|hello>` and `<ipa:[həˈloʊ]|hello>` also work. The enclosing transcription marks are optional.
-- The same tags work inside `[Narrator]`, `[Alice]`, or any other speaker's portion, including in the middle of a paragraph. Tags are preserved across chunking, and inline IPA takes priority over pronunciation dictionaries for that span.
-- The **Voices → Insert inline IPA in text** menu command adds tags without remembering their syntax.
-- Literal common HTML tags such as `<i>` and `<br>` are not treated as IPA. To avoid ambiguity in HTML content or ASCII-only IPA, always use the explicit `ipa:` form.
-
-**What synthesizes it?** Phoneme-level pronunciation requires the Piper Python backend (or the self-contained portable Piper worker) and a Piper voice whose phoneme mapping contains those IPA sounds. Merely installing the legacy Piper executable is not enough. If the model cannot represent a phoneme, the app reports a clear error, or uses the optional fallback. Openmukti cannot force one ONNX model to pronounce the entire IPA inventory of every language. Direct IPA with unsupported engines needs a fallback.
-
-**Command-line examples:**
+Requirements: Node.js 22 or later (Node.js 24 recommended), npm, and a modern browser.
 
 ```bash
-openmukti render --engine piper -n en_US-amy-medium -t 'Hello <ipa:həˈloʊ|hello>!' -w hello.wav
-openmukti multivoice --project characters.json -f tagged-story.txt -w story.mp3
-openmukti video --engine piper -f tagged-story.txt --images cover.png -w story.mp4
+npm ci
+npm test
+npm run build
 ```
 
-You do **not** need `--ipa-dictionary` for inline tags. Existing JSON/TSV pronunciation rules still work beside them.
-
-## Quick start
-
-Install **Python 3.10+** and extract the source archive. Open a terminal in its directory:
+Serve the generated `dist/` folder over HTTP, for example:
 
 ```bash
-python -m pip install ".[ocr]"
-python -m openvoice.cli gui
+python3 -m http.server 8000 --directory dist
 ```
 
-Windows x64 users with CPython 3.15.2 may double-click `Build-Portable-EXEs.bat` to build fully portable desktop and command-line executables with a separately bundled Piper helper. See `PYTHON_315_PORTABLE_BUILD.md`. The build downloads FFmpeg/FFprobe and needs internet access. **The source ZIP does not contain prebuilt Windows EXEs.** Linux users can install the included `.deb` or run the generated portable archive, with Python, Tkinter, FFmpeg, and an available TTS engine.
+Open `http://localhost:8000`. Browsers block module scripts and worker loading on `file://` pages, so `dist/index.html` opened straight from disk shows a blank page — use a local server, or use the **single-file build** instead: the build also produces `dist/proofloom-standalone.html` (~57 MB), one self-contained page with every dictionary embedded that opens from a double click, no server and no installation needed. In the standalone file the checker runs from an embedded Blob worker and drafts stay in memory (browsers grant no storage on `file://` pages), so export your work instead of relying on autosave. OCR and PDF import stay server-only features. The GitHub source package builds the complete self-contained `dist/` folder, including the English dictionaries, per-language frequency lists, domain dictionaries, context model, and OCR assets, from its locked dependencies. Regenerate the corpus-derived context model with `node scripts/build-context-model.mjs` (optional; the committed model is used by the build).
 
-For stronger offline Latin-script language identification (optional):
+## Publish on GitHub Pages
 
-```bash
-python -m pip install '.[languages]'
-```
+1. Create a GitHub repository and upload this project's source files. Keep `package.json`, `package-lock.json`, `src/`, `scripts/`, `tests/`, `docs/`, `examples/`, `vendor/`, and `.github/workflows/pages.yml` together at the root. **No dictionaries need to be downloaded or committed separately** — the 36 Hunspell dictionaries ship as the locked `dictionary-*` npm packages and GitHub Actions unpacks and bundles them during the Pages build. The vendored `vendor/` folder (frequency lists, corpus) should be uploaded as-is; `scripts/fetch-frequency.sh` can restore it if needed.
+2. In **Settings → Pages → Build and deployment**, select **GitHub Actions**.
+3. Push to the `main` branch or manually run the **Deploy Proofloom to Pages** workflow.
+4. GitHub Actions installs the locked dependencies, runs the tests, builds `dist/` (including `proofloom-standalone.html`), and publishes it. Open the Pages URL shown in the workflow.
 
-## Character voices
+All runtime asset URLs are relative, including dictionary, worker, OCR, and font paths, so repository-subpath hosting works. The workflow does not run a grammar server. An optional LanguageTool server needs separate hosting; see [the server guide](docs/GRAMMAR_SERVER.md).
 
-Open **Character Voices** in the main window. Create or auto-detect a narrator and characters. Select a Piper voice for each character or leave their voice blank for automatic synthesis. The script accepts speaker tags anywhere in a line:
+The project has no browser API keys, analytics, CDN runtime dependencies, or subscription requirements for its local engine. Initial website and asset downloads still require a network connection (the domain dictionaries are a ~2 MB gzip download on first check). After successful caching, normal checks work offline. Large OCR/PDF assets are cached as used and can be evicted by the browser. For a completely disconnected machine, serve the included `dist/` folder locally.
 
-```text
-[Narrator] The door opened slowly.
-[Alice] Is anybody here? [Bob] I am here.
-[Narrator] The two friends went home.
-```
+## Honest scope
 
-Save a `.json` voice project for reuse. Each tag changes the synthesizer for the next passage. If you use Piper models, the actual Piper executable must also be installed. The text-to-audio and text-to-video exporters and the bulk book converter can all use the same voice project.
+This is an extensible working editor with a substantially deepened local engine — **not a verified replacement for every Grammarly feature**. The rule count includes generated variants and data-driven entries; the algorithm count counts distinct, independently implemented procedures, not thousands. No evidence establishes it as the world's most powerful checker. It does not ship generative rewriting, plagiarism detection, fact checking, semantic guarantees, professional translation, or a full syntactic parser. Rule confidence is a hand-assigned estimate, not a calibrated probability. Suggestions can be wrong.
 
-## Download Piper voices
+The context model is mined from 19th-century public-domain literature; its coverage is strongest for frequent function words and it can be silent (or occasionally wrong) on modern idioms — a low margin never triggers a suggestion, and pattern tests carry the remaining load. Spelling dictionaries ship for the 36 languages listed above plus English, each with a frequency-ranked suggestion model; **grammar, punctuation, style, confusion-set, dialect, and OCR rules remain English-focused** and do not run for other languages, which get dictionary-driven spelling with frequency-ranked suggestions. Languages without a bundled dictionary (for example Finnish, Hindi, Arabic, Chinese, Japanese, Thai) keep the existing path: import a Hunspell pair or wordlist pack, or connect a LanguageTool-compatible server. The architecture does not impose a fixed list of languages: BCP-47 IDs, Unicode text, per-pack direction, locale-aware segmentation, and separate check providers allow future language development.
 
-In the GUI choose **Voices → Download Piper voices by language**, select a language or search for a particular voice, then download selected, all shown, or the entire catalog. Large catalog downloads can consume **many gigabytes**; the app shows an estimated size and asks for confirmation. Each voice is downloaded as a model `.onnx` and configuration `.onnx.json` with verification against the [rhasspy/piper-voices voices.json](https://huggingface.co/rhasspy/piper-voices/blob/main/voices.json) metadata. Models download on demand, not in this source archive. Some voice models have additional conditions; check the individual model cards before redistribution.
+No program can read every past and future dictionary format automatically. The built-in adapters cover the formats above (including CSpell tries via `cspell-trie-lib` at build time). StarDict, DSL, Babylon, proprietary binary dictionaries, legacy encodings, unusual Hunspell directives, and future formats need conversion or an adapter. nspell implements the essential Hunspell core, not every Hunspell feature. A `.dic` without its `.aff` provides surface forms only.
 
-Piper provides voices in multiple languages. The catalog does not reliably list gender, age, or vocal character: those profile preferences are editable descriptions, not guarantees about a model. Language detection is a heuristic with an optional higher-accuracy backend and should be reviewed for mixed-language fiction, transliterated languages, or very short passages.
+Imports extract editable text. **Original formatting, illustrations, exact PDF layout, footnote links, annotations, and tracked changes are not preserved.** Export creates a new document or ebook. PDF reading order depends on the source. Basic RTF extraction does not implement every RTF control. DRM/encrypted ebooks and legacy binary DOC/MOBI/AZW are not supported directly. Subtitle timestamps are kept as text; subtitles do not have a specialized timeline editor.
 
-## Command-line examples
+The browser does not contain a general language model. Complex agreement, long-distance syntax, and narrative tone are beyond a finite local ruleset. Connect a self-hosted grammar engine or build a provider to expand that coverage. Existing public LanguageTool endpoints are not automatically used.
 
-```bash
-openmukti voice-catalog --language English
-openmukti voice-download en_US-amy-medium --yes
-openmukti detect-language -f chapter.txt
-openmukti character-profiles -f chapter.txt -w characters.json
-openmukti multivoice --project characters.json -f chapter.txt -w audiobook.mp3
-openmukti multivoice --project characters.json -f chapter.txt --images cover.png -w audiobook.mp4
-openmukti audiobooks --folder books --output-dir output --output-type audio --audio-format mp3 --voices-project characters.json --mode both
-openmukti audiobooks --folder books --output-dir output --output-type video --voices-project characters.json --mode both
-```
+## Limits and data care
 
-## File naming for bulk conversion
+- Up to 80 MB per imported file; 100 MB expanded archive size; 6,000 archive entries.
+- Up to 500 PDF pages, 3,000 ebook sections, and two million UTF-16 text characters per document.
+- Up to 3,000 reported issues per check. Resolve these and check again. Whole-book reports retain up to 12,000 issues across sections. Each chunk computes suggestions for up to 160 unknown words; later unknown words can still be flagged.
+- Up to 60 imported resource packs; 12 MB per resource file; 400,000 words and 10,000 literal rules per pack.
+- Connected checks accept a chapter of up to 18,000 characters. Browser access requires HTTPS/CORS, and local servers may require additional browser permission.
+- Browser storage is local to an origin/profile. Clearing site data removes drafts. Export files or a workspace backup for safekeeping. No cloud synchronization is provided.
+- Without `DecompressionStream` support (all current major browsers have it), the domain dictionaries and bundled language dictionaries are skipped; checking falls back to Hunspell, corrections, and the context model for English, and to imported packs for other languages.
 
-```text
-MyLibrary/
-  First Book/
-    Chapter 01.txt
-    Chapter 01.png
-    Chapter 02.txt
-    Chapter 02.jpg
-  Second Book/
-    Chapter 01.txt
-    Chapter 01.jpg
-```
+## Keyboard controls
 
-Covers are necessary for videos but **not** for audio-only audiobooks. You can also use a JSON manifest to explicitly match chapter text, cover images, recorded narration, and per-book character voice projects. See `examples/` and `USER_MANUAL.md`.
+| Shortcut | Action |
+| --- | --- |
+| Ctrl/Cmd K | Quick actions |
+| Ctrl/Cmd Enter | Check the current chapter |
+| Ctrl/Cmd Alt N | New document |
+| Ctrl/Cmd S | Save the current browser draft |
+| Ctrl/Cmd F | Find and replace in the writing desk |
+| Ctrl/Cmd Z | Undo a document edit |
+| Ctrl/Cmd Shift Z | Redo a document edit |
+| Escape | Close a dialog or leave focus mode |
 
-## Honest compatibility notes
+## Extend it
 
-- Native Windows x64 and Windows ARM64 executables must be built on compatible Windows machines. Build scripts are included; prebuilt native EXEs are **not** included here.
-- No voice ONNX models are included. The catalog downloader requires internet access for first use; previously fetched metadata is cached for later reference.
-- Piper is a separate runtime. The app can use OS voices or eSpeak while Piper is absent.
-- FFmpeg/FFprobe are embedded by the native Windows release builder; `.deb` installs FFmpeg as a system dependency.
-- Version 1 intentionally does not include Gutenberg Mode.
+See [EXTENSIONS.md](docs/EXTENSIONS.md), [LANGUAGE_PACKS.md](docs/LANGUAGE_PACKS.md), [ARCHITECTURE.md](docs/ARCHITECTURE.md), and the examples. Add trusted code providers in `src/custom-extensions.js`; the UI, engine, and existing document importers do not need to be rewritten. Uploaded runtime JSON packs are deliberately data-only and match literal phrases. Imported content is displayed as text, not executed as HTML.
 
-See `USER_MANUAL.html`, `USER_MANUAL.md`, `VOICE_STUDIO.md`, `IPA_PRONUNCIATION.md`, and `ABOUT_US.md`.
+## Licensing
 
-## Windowed, maximized, and fullscreen display (1.0.2)
-
-The desktop window automatically fits the available display at startup. The main audio and export buttons stay visible at the bottom while the voice-settings panel scrolls independently. Chapter management, character voices, Piper downloads, and video settings use scrollbars when their full contents cannot fit vertically. Chapter tables also have horizontal scrolling.
-
-Press **F11** to toggle fullscreen. Press **Esc** to leave fullscreen (outside fullscreen, Esc retains its Stop behavior). You can resize the main window or popups freely, including on low-resolution screens; scroll within a popup to reach its bottom actions. See `USER_MANUAL.md` for layout details.
-
-
-## Version 1.0.2: Bengali Piper and live display adjustment
-
-The app now checks Piper configuration before synthesis. Some voice configurations contain phoneme-map entries with multi-character keys (for example `ar`) that the legacy Piper executable rejects while loading the configuration. The app uses a temporary compatibility configuration containing only codepoints the legacy engine can process. Original ONNX and `.onnx.json` files remain unchanged. If a voice cannot be safely adapted, the app explains the problem and offers the optional Python Piper backend instead of displaying an opaque process exit code. This is not a Bengali text-encoding issue.
-
-The GUI checks the available display area periodically and moves/resizes its windows into the visible desktop when Windows changes resolution, display scaling, taskbar or monitor. Fullscreen is left alone until exited. The main action controls remain outside the scrollable editing panel and toolbar secondary actions collapse on smaller windows (they remain available in File/Tools/Voices menus). Popup forms scroll when needed. All screen sizes are bounded by the desktop work area and OS window decorations; displays smaller than 640×480 may require scrolling or a larger usable desktop area.
-
-Rebuild the Windows EXE from this source with `Build-Portable-EXEs.bat`. An EXE compiled from older source won't acquire these fixes automatically.
-
-## Version 1.0.3 — Windows Piper playback repair
-
-Windows WAV playback now invokes a packaged PowerShell script using `-File` and a separately passed `-WavPath` argument. This fixes the unexpected-token error when Windows paths are interpreted as PowerShell source text. Piper synthesis and audio export remain unchanged. Rebuild both Windows EXE programs from this source; older EXEs will retain the error.
-
-
-## 6A. Real voice design: age, presentation, and personality
-
-Character age, voice presentation, and personality now affect **generated speech** rather than simply recording a description. Open **Character Voices**, select or add a profile, and choose an **Age**, **Voice presentation**, and **Voice personality**. You can combine personality words separated by commas, for example `warm, calm`, `cheerful, energetic`, or `mysterious, dramatic`. The available keywords are shown in the dropdown. Set **Voice transformation strength** to 0 for the unmodified model voice, or raise it to increase the audible change. Use **Pitch correction** to fine-tune the result. Click **Preview character voice with effects** and listen before producing an entire book. For a non-English model, choose or enter a passage in the model's language.
-
-The voice designer calculates a bounded pitch adjustment, small pacing change, low/high frequency tone adjustments and, for selected styles, dynamics compression. Piper's synthesis speed and an FFmpeg audio filter chain are applied to **each character passage**, so the same controls work with any Piper language model and also in audio-only, per-chapter, whole-book and video audiobook outputs. FFmpeg is required for audible transformations; the application reports an error rather than silently ignoring requested effects when FFmpeg is unavailable. The same profile settings are saved in the voice project JSON and reused during batch exports.
-
-**Important limitations:** These are audio effects, not neural voice conversion or newly trained age/gender-specific models. The base voice model strongly determines naturalness. The presentation settings are artistic pitch/timbre preferences, not verified biological voice attributes. Changing the profile cannot reliably make a voice sound like every age or gender; extreme changes may introduce artifacts. Results differ by model, language, accent and recording quality. There is no separate claim that the official Piper catalog supplies verified age/gender metadata. For the most realistic performance, start with a suitable model and make modest changes.
-
-The processor prefers FFmpeg's Rubber Band pitch-shifting filter when available and falls back to FFmpeg's standard pitch/tempo filters when the bundled FFmpeg build does not include it. The fallback may create more artifacts. Character voice processing is performed entirely on audio and does not translate speech or rewrite language-specific phonemes.
-
-For examples of age, voice presentation, and personality effects, see `VOICE_DESIGNER.md` and `examples/Voice-Designer-Profiles.json`.
-
-
-## Windows security-focused release packaging (1.0.7)
-
-Native Windows packages now default to self-contained PyInstaller **onefile** executables with embedded FFmpeg and Piper runtime components. The complete portable ZIP preserves all application features and includes per-file SHA-256 hashes. See `SECURITY_AND_RELEASE.md` for build, inspection, signing and false-positive reporting.
-
-## IPA pronunciations (Version 1.0.7)
-
-Open **Voices → IPA Pronunciation Editor** to assign Unicode IPA pronunciations to words and phrases. Choose a language such as `en`, `bn`, `hi`, `fr` or `*` for all languages. Save a JSON/TSV dictionary and use it for normal speech, character projects, audio-only audiobooks and audiobook videos.
-
-```bash
-openmukti ipa-check examples/ipa-pronunciations.json
-openmukti render --engine piper --ipa-dictionary examples/ipa-pronunciations.json -f chapter.txt -w chapter.wav
-openmukti multivoice --project characters.json --ipa-dictionary examples/ipa-pronunciations.json -f chapter.txt -w story.mp3
-```
-
-Direct IPA-to-speech uses the **optional Python Piper runtime** with a model whose phoneme map supports the chosen IPA symbols. Standard Piper CLI and ordinary speech engines do **not** accept arbitrary IPA; provide a `spoken` fallback for them. See [IPA_PRONUNCIATION.md](IPA_PRONUNCIATION.md) for the format, setup, language rules, scope and limitations.
-
-## GitHub source distribution
-
-This repository contains source, tests, essential assets, examples, user documentation, and packaging scripts. Generated EXEs, compiled packages, caches, demos, large voice models, and third-party binaries are intentionally **not committed**. Use `.gitignore` to keep build artifacts out of pull requests.
-
-## Python 3.15.2 portable Windows build (Version 1.0.11)
-
-Use `Build-Portable-EXEs.bat` on Windows x64 with CPython **3.15.2**. The main GUI and CLI use Python 3.15.2, while a bundled Piper helper built with Python 3.12 preserves neural IPA synthesis despite the current ONNX Runtime wheel limitation. Both runtimes are frozen into the portable package, so destination computers need no Python installation. See `PYTHON_315_PORTABLE_BUILD.md` for detailed instructions.
+Original application code is MIT licensed. Third-party data and libraries retain their own licenses. **The transformed CSpell spelling-correction data remains CC BY-SA 4.0**, as do the OpenSubtitles frequency ranks and the derived confusion-set context statistics; attribution and source links are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Full dependency license files are copied into `dist/licenses/` during the build. Do not remove those notices when distributing the site.

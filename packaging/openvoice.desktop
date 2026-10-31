@@ -1,8 +1,0 @@
-[Desktop Entry]
-Type=Application
-Name=Openmukti Audiobook Maker
-Comment=Text to speech and audiobook video creator
-Exec=openmukti-gui
-Icon=openvoice
-Terminal=false
-Categories=AudioVideo;Audio;Utility;

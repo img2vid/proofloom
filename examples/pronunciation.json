@@ -1,5 +1,0 @@
-[
-  {"find": "GPU", "replace": "G P U"},
-  {"find": "Dr.", "replace": "Doctor", "case_sensitive": false},
-  {"find": "(?i)\\bwww\\.", "replace": "double u double u double u dot ", "regex": true}
-]

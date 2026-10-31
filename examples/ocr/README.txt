@@ -1,1 +1,0 @@
-Open sample-scan.png, sample-scanned-book.pdf, or sample-image-book.zip with Import scans. The ZIP demonstrates natural ordering (page1, page2, page10). Open sample-typos.txt to try clickable spelling suggestions and Correct all OCR. See OCR_AND_SPELLING.md for installation and build instructions.
