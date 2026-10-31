@@ -1,0 +1,23 @@
+name: Build Fedora RPM
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+jobs:
+  rpm:
+    runs-on: ubuntu-latest
+    container:
+      image: fedora:latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: dnf install -y rpm-build python3 tar gzip
+      - run: python3 packaging/build_linux.py --out dist
+      - run: mkdir -p /tmp/rpmbuild/SOURCES /tmp/rpmbuild/BUILD /tmp/rpmbuild/RPMS /tmp/rpmbuild/SRPMS
+      - run: cp dist/openvoice-0.4.0.pyz /tmp/rpmbuild/SOURCES/openvoice-0.4.0.pyz
+      - run: rpmbuild --define '_topdir /tmp/rpmbuild' -bb packaging/openvoice.spec
+      - run: mkdir -p dist && cp /tmp/rpmbuild/RPMS/noarch/*.rpm dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Openmukti-Audiobook-Maker-Fedora-RPM
+          path: dist/*.rpm

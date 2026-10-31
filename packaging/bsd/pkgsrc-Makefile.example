@@ -1,0 +1,10 @@
+DISTNAME= Openmukti Audiobook Maker-1.0.0-Source
+PKGNAME= openvoice-1.0.0
+CATEGORIES= audio
+MASTER_SITES=
+COMMENT= Offline speech and audiobook video creator
+LICENSE= mit
+USE_LANGUAGES= # none
+PYTHON_VERSIONS_INCOMPATIBLE= 27
+.include "../../lang/python/pyversion.mk"
+.include "../../mk/bsd.pkg.mk"

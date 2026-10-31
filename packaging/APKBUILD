@@ -1,0 +1,17 @@
+pkgname=openvoice
+pkgver=0.4.0
+pkgrel=0
+pkgdesc="Offline text-to-speech GUI and console"
+arch="noarch"
+license="MIT"
+depends="python3"
+makedepends=""
+source="openvoice-${pkgver}.pyz"
+package() {
+    install -Dm644 "$srcdir/openvoice-${pkgver}.pyz" "$pkgdir/usr/share/openvoice/openvoice.pyz"
+    install -d "$pkgdir/usr/bin"
+    printf '%s\n' '#!/bin/sh' 'exec python3 /usr/share/openvoice/openvoice.pyz "$@"' > "$pkgdir/usr/bin/openvoice"
+    printf '%s\n' '#!/bin/sh' 'exec python3 /usr/share/openvoice/openvoice.pyz gui "$@"' > "$pkgdir/usr/bin/openvoice-gui"
+    chmod +x "$pkgdir/usr/bin/openvoice" "$pkgdir/usr/bin/openvoice-gui"
+}
+sha512sums=""

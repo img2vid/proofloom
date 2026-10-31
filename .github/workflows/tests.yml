@@ -1,0 +1,28 @@
+name: Unit tests
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+jobs:
+  unit:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python: ['3.10', '3.12']
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install -e '.[dev]'
+      - if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tesseract-ocr tesseract-ocr-eng tesseract-ocr-osd espeak-ng xvfb
+          python -m pip install '.[ocr,pdf]'
+      - run: python -m pytest -v
+      - if: runner.os == 'Linux'
+        run: xvfb-run -a python -m pytest -v tests/test_ocr_gui.py
+      - run: python -m build

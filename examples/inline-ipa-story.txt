@@ -1,0 +1,4 @@
+[Narrator] The old notebook contained an unusual word: <ipa:həˈloʊ|hello>.
+[Alice] Can you pronounce <ipa:kat|cat> clearly?
+[Bob] Yes! And the French word is <ipa:bɔ̃ʒuʁ|bonjour>.
+[Narrator] They were pleased with their custom pronunciations.

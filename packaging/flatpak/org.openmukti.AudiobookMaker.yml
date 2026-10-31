@@ -1,0 +1,32 @@
+id: org.openmukti.AudiobookMaker
+runtime: org.freedesktop.Platform
+runtime-version: '24.08'
+sdk: org.freedesktop.Sdk
+command: openmukti-gui
+finish-args:
+  - --share=ipc
+  - --socket=fallback-x11
+  - --socket=wayland
+  - --filesystem=home
+  - --socket=pulseaudio
+modules:
+  - name: openvoice
+    buildsystem: simple
+    build-commands:
+      - install -Dm644 openvoice.pyz /app/share/openvoice/openvoice.pyz
+      - install -Dm755 openvoice-gui /app/bin/openmukti-gui
+      - install -Dm755 openvoice-cli /app/bin/openmukti
+      - install -Dm644 openvoice.desktop /app/share/applications/org.openmukti.AudiobookMaker.desktop
+      - install -Dm644 openmukti-icon.png /app/share/icons/hicolor/192x192/apps/org.openmukti.AudiobookMaker.png
+    sources:
+      - type: file
+        path: ../../dist/openmukti-audiobook-maker-app-1.0.0.pyz
+        dest-filename: openvoice.pyz
+      - type: file
+        path: ../flatpak/openvoice-gui
+      - type: file
+        path: ../flatpak/openvoice-cli
+      - type: file
+        path: ../flatpak/openvoice.desktop
+      - type: file
+        path: ../../openvoice/resources/openmukti-icon.png

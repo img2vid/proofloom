@@ -1,0 +1,2 @@
+Openmukti Audiobook Maker Version 1
+Gutenberg Mode is not bundled in this release.

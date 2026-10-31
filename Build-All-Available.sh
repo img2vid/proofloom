@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+cd "$(dirname "$0")"
+python3 packaging/build_release.py all
+printf '\nRead dist/release-report.json for built and unavailable targets.\n'

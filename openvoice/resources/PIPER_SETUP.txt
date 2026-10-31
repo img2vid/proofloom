@@ -1,0 +1,12 @@
+# Add Piper Neural Voices — Simple Instructions
+
+1. Install the **Piper executable** matching your operating system and CPU architecture from the Piper project or your distribution's package repository.
+2. Launch Openmukti Audiobook Maker Version 1.
+3. Choose **Voices → Download Piper voices by language**.
+4. Pick a language, such as English, Bengali, or Hindi, then select a model. Press **Download Selected**.
+5. The application automatically downloads the `.onnx` file and its matching `.onnx.json` file, checks the published checksums, and places both in your local voice library.
+6. Click **Refresh installed voices**. Choose Piper, Auto, or assign individual Piper models in **Character Voices**.
+
+Manual installation: download matching model/config files from https://huggingface.co/rhasspy/piper-voices/tree/main and choose **Add local Piper model + configuration**.
+
+Voices are not bundled into the source download. The downloader requires a network connection. If you choose to download all models, check the displayed size first; the entire catalog can consume many gigabytes. Individual voices may have licensing conditions; review their model cards before distribution.

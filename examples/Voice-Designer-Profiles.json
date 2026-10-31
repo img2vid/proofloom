@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "script": "[Narrator] The village clock struck noon. [Mira] Look, the mountains are glowing! [Rowan] The storm will come before nightfall. [Narrator] They hurried home.",
+  "profiles": [
+    {
+      "name": "Narrator",
+      "voice": "",
+      "gender": "Unspecified",
+      "age": "Unspecified",
+      "language": "auto",
+      "characteristics": "warm, calm",
+      "rate": 0,
+      "pitch": 0,
+      "design_strength": 85
+    },
+    {
+      "name": "Mira",
+      "voice": "",
+      "gender": "Female",
+      "age": "Child",
+      "language": "auto",
+      "characteristics": "cheerful, energetic",
+      "rate": 0,
+      "pitch": 0,
+      "design_strength": 82
+    },
+    {
+      "name": "Rowan",
+      "voice": "",
+      "gender": "Male",
+      "age": "Senior",
+      "language": "auto",
+      "characteristics": "serious, gruff",
+      "rate": 0,
+      "pitch": 0,
+      "design_strength": 80
+    }
+  ]
+}
