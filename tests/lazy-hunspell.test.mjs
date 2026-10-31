@@ -57,7 +57,7 @@ test('lazy multilingual checking retains real bundled dictionaries', () => {
     ['es', es, 'cocina'], ['ru', ru, 'спасибо'],
   ]) {
     const spell = new LazyHunspell(dictionary, {locale});
-    assert.equal(spell.correct(known), true, locale + ' must recognize a common word');
+    assert.equal(spell.correct(known), true, locale + ' must recognize ' + known + '; direct=' + spell.words.has(spell.lower(known)) + '; sample=' + [...spell.words.keys()].filter(w => w.includes(spell.lower(known))).slice(0, 5).join('|') + '; stems=' + spell.words.size);
     assert.equal(spell.correct('zzzxxy'), false, locale + ' must detect an obvious error');
   }
 });
