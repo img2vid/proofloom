@@ -20,6 +20,15 @@ test('lazy Hunspell accepts stems, suffixes, prefixes and crossed forms', () => 
   assert.equal(spell.correct('ricasano'), true);
 });
 
+test('independent Hunspell homonyms are not invalidated by NEEDAFFIX on another entry', () => {
+  const aff = 'SET UTF-8\nNEEDAFFIX h\nSFX S Y 1\nSFX S 0 e .';
+  const dic = '3\nHaus/S\nhaus/h\nHaus/hS';
+  const spell = new LazyHunspell({aff, dic}, {locale: 'de'});
+  assert.equal(spell.correct('Haus'), true);
+  assert.equal(spell.correct('Hause'), true);
+  assert.equal(spell.correct('Hausx'), false);
+});
+
 test('synthetic cross-product dictionary stays bounded instead of expanding millions of forms', () => {
   const aff = ['SET UTF-8', 'PFX P Y 120'];
   for (let i = 0; i < 120; i++) aff.push('PFX P 0 p' + i + ' .');
@@ -57,7 +66,7 @@ test('lazy multilingual checking retains real bundled dictionaries', () => {
     ['es', es, 'cocina'], ['ru', ru, 'спасибо'],
   ]) {
     const spell = new LazyHunspell(dictionary, {locale});
-    assert.equal(spell.correct(known), true, locale + ' must recognize ' + known + '; direct=' + spell.words.has(spell.lower(known)) + '; sample=' + [...spell.words.keys()].filter(w => w.includes(spell.lower(known))).slice(0, 5).join('|') + '; stems=' + spell.words.size);
+    assert.equal(spell.correct(known), true, locale + ' must recognize ' + known);
     assert.equal(spell.correct('zzzxxy'), false, locale + ' must detect an obvious error');
   }
 });
