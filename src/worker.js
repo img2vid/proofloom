@@ -9,6 +9,7 @@
 import {ProofEngine, chunks, MAX_ISSUES, metrics, protectedRanges, inProtected} from './core/checker.js';
 import {readabilityProfile} from './core/algorithms/readability.js';
 import {bundledVariant} from './core/languages.js';
+import {LazyHunspell} from './core/lazy-hunspell.js';
 import './custom-extensions.js';
 import {extensionChecks} from './extensions.js';
 
@@ -66,7 +67,7 @@ async function getEngine(language) {
         loadGzipped(`./data/lang/${variant}.dic.gz`),
         loadFrequency(variant),
       ]);
-      engine = new ProofEngine({aff, dic}, {}, {frequency});
+      engine = new ProofEngine(new LazyHunspell({aff, dic}, {frequency, locale: variant}), {}, {frequency});
     } else if (variant.startsWith('none')) {
       // No bundled dictionary for this language: user packs and wordlists
       // still drive the spelling pipeline.
@@ -88,6 +89,8 @@ async function getEngine(language) {
       const spache = new Set(domain.spache || []);
       engine = new ProofEngine({aff, dic}, corrections, {frequency, domainWords: domainSet, contextModel, daleChallSet: daleChall, spacheSet: spache});
     }
+    // Keep a small number of active engines to bound memory after changing languages.
+    if (engines.size >= 2) engines.delete(engines.keys().next().value);
     engines.set(variant, engine);
   }
   return engine;
