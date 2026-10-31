@@ -9,6 +9,8 @@ import {remoteCheck,validateEndpoint} from './core/remote.js';
 import {importDocument,exportDocument,downloadBlob,MAX_TEXT_LENGTH} from './documents.js';
 import {SAMPLE_TEXT,OCR_SAMPLE,EXAMPLE_PLUGIN} from './sample.js';
 import {createId} from './id.js';
+import {showQuickFix,closeQuickFix,quickFixOpen} from './quickfix.js';
+import {findIssueAtOffset} from './core/quickfix.js';
 
 const $=selector=>document.querySelector(selector);
 const main=$('#main'),dialog=$('#modal');
@@ -53,7 +55,7 @@ function go(route){
 }
 function render(route=location.hash.slice(1)||'editor'){
   if(!['editor','documents','resources','ocr','plugins','settings'].includes(route))route='editor';
-  state.route=route;state.findOpen=false;document.body.classList.remove('nav-open');
+  state.route=route;state.findOpen=false;document.body.classList.remove('nav-open');closeQuickFix();
   document.querySelectorAll('[data-nav]').forEach(n=>n.classList.toggle('active',n.dataset.nav===route));
   $('#breadcrumb-current').textContent={editor:'Writing desk',documents:'My documents',resources:'Dictionaries & languages',ocr:'OCR studio',plugins:'Extension lab',settings:'Preferences'}[route];
   const ctx=context();
@@ -85,7 +87,7 @@ function showEditorNotice(){
   const n=$('#editor-notice');if(!n)return;
   const doc=currentDoc();let text='';
   if(doc.importNote)text=`<div class="restoration-callout">${icon(doc.ocr?'scan':'info')}<span>${e(doc.importNote)}</span></div>`;
-  if(!doc.language?.startsWith('en')&&!state.resources.some(p=>p.enabled&&(p.language===doc.language||p.language===doc.language.split('-')[0])))text+=`<div class="editor-warning">This language has no active resource pack. Add vocabulary and language rules in Dictionaries & languages.</div>`;
+  if(!doc.language?.startsWith('en')&&!(state.meta?.languages||[]).some(l=>l.code===doc.language||l.code===doc.language.split('-')[0])&&!state.resources.some(p=>p.enabled&&(p.language===doc.language||p.language===doc.language.split('-')[0])))text+=`<div class="editor-warning">This language has no bundled dictionary or active resource pack. Add vocabulary and language rules in Dictionaries & languages.</div>`;
   if(state.workerError)text+=`<div class="editor-warning">The local worker could not start. ${e(state.workerError)}. Serve this website over HTTPS or localhost; file:// is not supported.</div>`;
   n.innerHTML=text;
 }
@@ -104,12 +106,39 @@ function renderHighlights(){
   const candidates=[...state.issues].sort((a,b)=>(a.id===state.selectedId?-1:b.id===state.selectedId?1:0)||b.confidence-a.confidence);
   for(const i of candidates){if(text.slice(i.start,i.end)!==i.original||i.start===i.end||selected.some(x=>i.start<x.end&&i.end>x.start))continue;selected.push(i);}
   let html='',cursor=0;
-  for(const i of selected.sort((a,b)=>a.start-b.start)){html+=e(text.slice(cursor,i.start))+`<mark class="${e(i.category)} ${i.id===state.selectedId?'selected':''}">${e(text.slice(i.start,i.end))}</mark>`;cursor=i.end;}
+  for(const i of selected.sort((a,b)=>a.start-b.start)){html+=e(text.slice(cursor,i.start))+`<mark class="${e(i.category)} ${i.id===state.selectedId?'selected':''}" data-issue-id="${e(i.id)}">${e(text.slice(i.start,i.end))}</mark>`;cursor=i.end;}
   layer.innerHTML=html+e(text.slice(cursor))+'\n';
 }
 function renderStats(){
   if(!$('#word-count'))return;const m=state.metrics;
   $('#word-count').textContent=(m.words||0).toLocaleString()+' words';$('#character-count').textContent=(m.characters||0).toLocaleString()+' characters';$('#reading-time').innerHTML=icon('clock')+`${m.readingMinutes||1} min read`;
+}
+// In-editor quick fix: clicking a highlighted word opens a correction
+// popover anchored to that word; picking one rewrites the text in place.
+function openQuickFixFor(issue){
+  const layer=$('#highlight-layer');if(!layer||!issue)return;
+  const selector=()=>layer.querySelector(`mark[data-issue-id="${CSS.escape(issue.id)}"]`);
+  let mark=selector();
+  if(!mark){state.selectedId=issue.id;renderAssistant();renderHighlights();mark=selector();}
+  if(!mark)return;
+  showQuickFix({
+    original:issue.original,category:issue.category,message:issue.message,
+    replacements:issue.replacements,chosen:state.choices[issue.id]||0,
+    anchor:mark.getBoundingClientRect(),
+    onPick:index=>applyQuickFix(issue,index),
+    onIgnore:()=>{state.ignored.add(issueKey(issue));renderAssistant();renderHighlights();},
+    onAddWord:()=>addPersonalWord(issue.original),
+    onDisable:()=>{state.settings.disabledRules.push(issue.ruleId);saveSettings();state.localIssues=state.localIssues.filter(x=>x.ruleId!==issue.ruleId);state.remoteIssues=state.remoteIssues.filter(x=>x.ruleId!==issue.ruleId);renderAssistant();renderHighlights();toast('Rule disabled. Reset it in Preferences.');},
+  });
+}
+function applyQuickFix(issue,index){
+  const replacement=issue.replacements[index];if(replacement===undefined)return;
+  state.choices[issue.id]=index;
+  const original=currentText();
+  if(original.slice(issue.start,issue.end)!==issue.original){closeQuickFix();toast('The text changed. Running another check.');queueCheck(0);return;}
+  setText(original.slice(0,issue.start)+replacement+original.slice(issue.end));
+  closeQuickFix();
+  toast('Correction applied.',false,{label:'Undo',run:()=>actions.undo()});
 }
 function queueCheck(delay=500){
   clearTimeout(state.checkTimer);state.version++;state.stale=true;state.remoteIssues=[];
@@ -389,6 +418,7 @@ document.addEventListener('click',async event=>{
 document.addEventListener('input',event=>{
   const t=event.target;
   if(t.id==='editor'){
+    closeQuickFix();
     const total=currentDoc().chapters.reduce((n,c)=>n+c.text.length,0)-currentText().length+t.value.length;
     if(total>MAX_TEXT_LENGTH){t.value=currentText();toast('The document has reached the two-million-character limit.',true);return;}
     pushUndo(currentText(),false);currentChapter().text=t.value;state.localIssues=[];state.remoteIssues=[];state.ignored.clear();state.metrics=metrics(t.value,currentDoc().language);resizeEditor();renderStats();renderHighlights();scheduleSave();queueCheck();
@@ -413,7 +443,7 @@ document.addEventListener('keydown',event=>{
   else if(mod&&event.key.toLowerCase()==='s'){event.preventDefault();void flushSave().then(()=>toast('Draft saved in this browser.'));}
   else if(state.route==='editor'&&!dialog.open&&mod&&event.key.toLowerCase()==='z'&&(event.target.id==='editor'||!event.target.matches('input,textarea,[contenteditable]'))){event.preventDefault();event.shiftKey?actions.redo():actions.undo();}
   else if(state.route==='editor'&&!dialog.open&&mod&&event.key.toLowerCase()==='f'){event.preventDefault();if(!state.findOpen)actions.find();else $('#find-text')?.focus();}
-  else if(event.key==='Escape'){document.body.classList.remove('focus-mode','nav-open');}
+  else if(event.key==='Escape'){document.body.classList.remove('focus-mode','nav-open');closeQuickFix();}
   else if(event.key==='Enter'&&event.target.id==='personal-word'){event.preventDefault();actions['personal-add']();}
 });
 $('#document-file').addEventListener('change',ev=>void importFiles(ev.target.files));
@@ -421,7 +451,16 @@ $('#resource-file').addEventListener('change',ev=>void importResources(ev.target
 $('#sidebar-new').onclick=()=>void actions.new();$('#quick-actions').onclick=actions.quick;$('#about-button').onclick=showHelp;$('#header-help').onclick=showHelp;
 $('#menu-button').onclick=()=>document.body.classList.toggle('nav-open');
 dialog.addEventListener('click',ev=>{if(ev.target===dialog){const r=dialog.getBoundingClientRect();if(ev.clientX<r.left||ev.clientX>r.right||ev.clientY<r.top||ev.clientY>r.bottom)dialog.close();}});
-window.addEventListener('hashchange',()=>{void flushSave();render();});window.addEventListener('resize',resizeEditor);
+window.addEventListener('hashchange',()=>{void flushSave();render();});window.addEventListener('resize',()=>{resizeEditor();closeQuickFix();});
+// Click-to-correct: a click in the editor that lands on a highlighted word
+// opens the correction popover for that issue.
+document.addEventListener('click',event=>{
+  if(state.route!=='editor'||dialog.open)return;
+  const ta=event.target.closest('#editor');
+  if(!ta)return;
+  const issue=findIssueAtOffset(state.issues,ta.selectionStart??0);
+  if(issue)openQuickFixFor(issue);else closeQuickFix();
+});
 window.addEventListener('beforeunload',event=>{if(!state.storage){event.preventDefault();event.returnValue='';}});
 document.addEventListener('visibilitychange',()=>{if(document.hidden)void flushSave();});
 

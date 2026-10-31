@@ -26,3 +26,19 @@
 .readability-chip{display:inline-flex;flex-direction:column;gap:2px;border:1px solid var(--border);border-radius:8px;padding:5px 9px;font-size:11px;color:var(--muted);background:var(--bg)}
 .readability-chip strong{font-size:13px;color:var(--ink)}
 .readability-panel .view-note{padding:0 14px 12px;margin:0}
+/* In-editor quick-fix popover (click a highlighted word) */
+.quickfix{position:fixed;z-index:90;min-width:210px;max-width:320px;background:var(--paper);border:1px solid var(--border);border-radius:12px;box-shadow:0 14px 36px rgba(24,60,52,.2);padding:10px;font-size:13px;animation:quickfix-in .12s ease-out}
+@keyframes quickfix-in{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:none}}
+.quickfix-header{display:flex;justify-content:space-between;align-items:baseline;gap:10px;margin-bottom:6px}
+.quickfix-word{font-weight:600;color:var(--red);text-decoration:line-through;overflow-wrap:anywhere}
+.quickfix-tag{font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);white-space:nowrap}
+.quickfix-list{display:flex;flex-direction:column;gap:2px;margin:4px 0}
+.quickfix-item{display:flex;align-items:center;gap:8px;text-align:left;padding:7px 9px;border:0;border-radius:8px;background:transparent;color:var(--ink)}
+.quickfix-item:hover,.quickfix-item:focus-visible{background:var(--mint);outline:none}
+.quickfix-item.chosen{background:var(--mint)}
+.quickfix-check{color:var(--green);font-weight:700}
+.quickfix-item ins{text-decoration:none;color:var(--green-dark);font-weight:500;overflow-wrap:anywhere}
+.quickfix-more{margin:2px 0 4px;color:var(--muted);font-size:12px;line-height:1.5}
+.quickfix-footer{display:flex;gap:4px;flex-wrap:wrap;border-top:1px solid var(--border);padding-top:7px;margin-top:5px}
+.quickfix-action{border:0;background:transparent;color:var(--green);font-size:12px;padding:4px 7px;border-radius:6px}
+.quickfix-action:hover,.quickfix-action:focus-visible{background:var(--mint);outline:none}

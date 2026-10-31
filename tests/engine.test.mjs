@@ -19,7 +19,13 @@ import {REGISTER, INCLUSIVE, PREPOSITIONS} from '../src/core/data/register-table
 const upstream = JSON.parse(fs.readFileSync('node_modules/@cspell/dict-en-common-misspellings/dict/dict-en.json', 'utf8'));
 const corrections = Object.fromEntries(upstream.dictionaryDefinitions.flatMap(d => [...d.suggestWords, ...d.flagWords]).map(s => s.split('->')).filter(s => s.length === 2).map(([a, b]) => [a.toLowerCase(), b.split(',').map(x => x.trim())]));
 const contextModel = JSON.parse(fs.readFileSync('src/core/data/context-model.json', 'utf8'));
-const frequency = new Map(JSON.parse(fs.readFileSync('dist/data/frequency.json', 'utf8')).words.map((w, i) => [w, i + 1]));
+// The frequency table is read from the vendored source list (not dist/) so the
+// suite runs without a prior build; parsing matches scripts/build.mjs exactly.
+const frequencyWords = fs.readFileSync('vendor/frequency/en_50k.txt', 'utf8')
+  .split('\n').map(line => line.split(' ')[0].trim())
+  .filter(w => /^[a-z][a-z'-]{0,30}$/.test(w));
+const frequency = new Map(frequencyWords.map((w, i) => [w, i + 1]));
+const distBuilt = fs.existsSync('dist/data/meta.json');
 
 function makeEngine(options = {}) {
   const engine = new ProofEngine(en, corrections, {contextModel, frequency, ...options});
@@ -226,7 +232,8 @@ test('metrics remain stable and finite', () => {
   assert.ok(Number.isFinite(m.readability));
 });
 
-test('worker data files exist and agree with the meta counts', () => {
+test('worker data files exist and agree with the meta counts',
+  {skip: distBuilt ? false : 'requires npm run build (dist/ is not built)'}, () => {
   const meta = JSON.parse(fs.readFileSync('dist/data/meta.json', 'utf8'));
   assert.ok(meta.rules > 5000);
   assert.ok(meta.algorithms >= 50);

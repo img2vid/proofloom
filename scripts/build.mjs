@@ -26,6 +26,43 @@ await mkdir('dist/licenses', {recursive: true});
 for (const file of ['index.html', 'style.css', 'favicon.svg']) await cp(`src/${file}`, `dist/${file}`);
 for (const [name, pkg] of [['en-US', 'dictionary-en'], ['en-GB', 'dictionary-en-gb']]) for (const ext of ['aff', 'dic']) await cp(`node_modules/${pkg}/index.${ext}`, `dist/data/${name}.${ext}`);
 
+// 1b) Bundled language dictionaries: Hunspell aff+dic pairs, gzipped so the
+// worker can decompress them on demand (only the selected language loads).
+const LANGUAGE_PACKS = [
+  ['bg', 'Bulgarian', 'dictionary-bg'], ['ca', 'Catalan', 'dictionary-ca'], ['cs', 'Czech', 'dictionary-cs'],
+  ['da', 'Danish', 'dictionary-da'], ['de', 'German', 'dictionary-de'], ['el', 'Greek', 'dictionary-el'],
+  ['eo', 'Esperanto', 'dictionary-eo'], ['es', 'Spanish', 'dictionary-es'], ['et', 'Estonian', 'dictionary-et'],
+  ['eu', 'Basque', 'dictionary-eu'], ['fa', 'Persian', 'dictionary-fa'], ['fr', 'French', 'dictionary-fr'],
+  ['ga', 'Irish', 'dictionary-ga'], ['gl', 'Galician', 'dictionary-gl'], ['he', 'Hebrew', 'dictionary-he'],
+  ['hr', 'Croatian', 'dictionary-hr'], ['hu', 'Hungarian', 'dictionary-hu'], ['is', 'Icelandic', 'dictionary-is'],
+  ['it', 'Italian', 'dictionary-it'], ['ko', 'Korean', 'dictionary-ko'], ['lt', 'Lithuanian', 'dictionary-lt'],
+  ['lv', 'Latvian', 'dictionary-lv'], ['nb', 'Norwegian Bokmål', 'dictionary-nb'], ['nl', 'Dutch', 'dictionary-nl'],
+  ['nn', 'Norwegian Nynorsk', 'dictionary-nn'], ['pl', 'Polish', 'dictionary-pl'], ['pt', 'Portuguese', 'dictionary-pt'],
+  ['ro', 'Romanian', 'dictionary-ro'], ['ru', 'Russian', 'dictionary-ru'], ['sk', 'Slovak', 'dictionary-sk'],
+  ['sl', 'Slovenian', 'dictionary-sl'], ['sr', 'Serbian', 'dictionary-sr'], ['sv', 'Swedish', 'dictionary-sv'],
+  ['tr', 'Turkish', 'dictionary-tr'], ['uk', 'Ukrainian', 'dictionary-uk'], ['vi', 'Vietnamese', 'dictionary-vi'],
+];
+await mkdir('dist/data/lang', {recursive: true});
+const languages = [];
+for (const [code, name, pkg] of LANGUAGE_PACKS) {
+  const base = `node_modules/${pkg}`;
+  if (!existsSync(`${base}/index.dic`) || !existsSync(`${base}/index.aff`)) {
+    console.warn(`Skipping ${pkg}: index.aff/index.dic missing (npm install first)`);
+    continue;
+  }
+  await writeFile(`dist/data/lang/${code}.aff.gz`, gzipSync(readFileSync(`${base}/index.aff`), {level: 9}));
+  await writeFile(`dist/data/lang/${code}.dic.gz`, gzipSync(readFileSync(`${base}/index.dic`), {level: 9}));
+  let license = 'See package';
+  try { license = JSON.parse(readFileSync(`${base}/package.json`, 'utf8')).license || license; } catch { /* keep default */ }
+  // Most Hunspell .dic files start with the entry count; fall back to a line
+  // count for packages whose header differs.
+  const dicText = readFileSync(`${base}/index.dic`, 'utf8');
+  const header = Number(dicText.split('\n')[0].trim());
+  const words = Number.isFinite(header) && header > 0 ? header : Math.max(0, dicText.split('\n').length - 1);
+  languages.push({code, name, words, license, source: `https://www.npmjs.com/package/${pkg}`});
+}
+languages.sort((a, b) => a.code.localeCompare(b.code));
+
 const WORD_FILTER = /^[a-zA-Z][a-zA-Z'’-]{1,47}$/;
 
 // 1) Spelling-correction mappings (CSpell common misspellings, US + GB).
@@ -175,6 +212,7 @@ const meta = {
   readabilityFormulas: READABILITY_FORMULAS.length,
   dataLicense: 'CC-BY-SA-4.0 (CSpell misspellings, OpenSubtitles frequencies)',
   dataSource: 'https://github.com/streetsidesoftware/cspell-dicts',
+  languages,
 };
 await writeFile('dist/data/meta.json', JSON.stringify(meta, null, 2));
 
@@ -219,4 +257,4 @@ const core = ['./', './index.html', './style.css', './app.js', './worker.js', '.
 const cacheId = 'proofloom-' + Date.now().toString(36);
 await writeFile('dist/sw.js', `const CACHE=${JSON.stringify(cacheId)};const CORE=${JSON.stringify(core)};self.addEventListener('install',e=>{e.waitUntil(caches.open(CACHE).then(c=>c.addAll(CORE)));});self.addEventListener('activate',e=>{e.waitUntil(caches.keys().then(keys=>Promise.all(keys.filter(k=>k.startsWith('proofloom-')&&k!==CACHE).map(k=>caches.delete(k)))));self.clients.claim();});self.addEventListener('fetch',e=>{if(e.request.method!=='GET'||new URL(e.request.url).origin!==self.location.origin)return;if(e.request.mode==='navigate'){e.respondWith(fetch(e.request).catch(()=>caches.match(new URL('./index.html',self.registration.scope))));return;}e.respondWith(caches.match(e.request).then(c=>c||fetch(e.request).then(r=>{if(r.ok&&!r.headers.get('content-type')?.includes('text/html')){const copy=r.clone();caches.open(CACHE).then(cache=>cache.put(e.request,copy)).catch(()=>{});}return r;})));});`);
 await writeFile('dist/.nojekyll', '');
-console.log(`Built Proofloom v2: ${meta.rules.toLocaleString()} rules (${meta.rulesDialect.toLocaleString()} dialect variants), ${meta.algorithms} algorithms, ${meta.corrections.toLocaleString()} correction mappings, ${meta.domainWords.toLocaleString()} domain words in ${meta.domainDictionaries} dictionaries, ${meta.frequencyWords.toLocaleString()} frequency-ranked words, ${meta.confusionSetsModelled} corpus-modelled confusion sets.`);
+console.log(`Built Proofloom v2: ${meta.rules.toLocaleString()} rules (${meta.rulesDialect.toLocaleString()} dialect variants), ${meta.algorithms} algorithms, ${meta.corrections.toLocaleString()} correction mappings, ${meta.domainWords.toLocaleString()} domain words in ${meta.domainDictionaries} dictionaries, ${meta.frequencyWords.toLocaleString()} frequency-ranked words, ${meta.confusionSetsModelled} corpus-modelled confusion sets, ${languages.length} bundled language dictionaries.`);

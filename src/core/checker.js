@@ -89,8 +89,9 @@ export class ProofEngine {
     if (this.personal?.has(lower) || this.wordlist?.has(lower)) return true;
     if (this.domainWords?.has(lower)) return true;
     if (this.extraSpells.some(s => s.correct(word))) return true;
-    if (this.english) return !!(this.spell?.correct(word) || this.spell?.correct(lower));
-    return false;
+    // The primary dictionary always matches the document language (English
+    // variants and every bundled language alike), so consult it directly.
+    return !!(this.spell?.correct(word) || this.spell?.correct(lower));
   }
 
   frequencyRank(word) {
@@ -132,7 +133,17 @@ export class ProofEngine {
           .map(s => ({word: s.word, score: s.score}));
       }
     } else {
-      scored = this.extraSpells.flatMap(s => s.suggest(lower)).slice(0, 5).map(word2 => ({word: word2, score: .7}));
+      // Bundled and imported Hunspell dictionaries rank their own
+      // morphology-aware candidates; keep their order as the ranking.
+      const candidates = [];
+      const seen = new Set([lower]);
+      const isKnown = w => {
+        const key = String(w).toLowerCase();
+        return key !== lower && !seen.has(key) && (seen.add(key), this.correct(key));
+      };
+      for (const s of this.spell?.suggest(lower) || []) if (isKnown(s)) candidates.push(String(s));
+      for (const s of this.extraSpells.flatMap(sp => sp.suggest(lower))) if (isKnown(s)) candidates.push(String(s));
+      scored = candidates.slice(0, 5).map((w, i) => ({word: w, score: .9 - i * .06}));
     }
     const result = [...new Map(scored.map(s => [s.word.toLowerCase(), s])).values()]
       .sort((a, b) => b.score - a.score).slice(0, 5)
@@ -220,7 +231,7 @@ export class ProofEngine {
     }
 
     // 5) Spelling pipeline.
-    const spellEnabled = enabled.has('spelling') && (this.english || this.extraSpells.length || this.wordlist?.size);
+    const spellEnabled = enabled.has('spelling') && !!(this.spell || this.extraSpells.length || this.wordlist?.size);
     let suggestions = 0;
     const occupied2 = (s, e) => issues.some(i => s < i.end && e > i.start && i.category !== 'style');
     if (spellEnabled || (options.ocr && this.english)) {
@@ -228,7 +239,7 @@ export class ProofEngine {
       for (const t of tokens) {
         if (issues.length >= MAX_ISSUES) break;
         const word = t.word, start = t.start, end = t.end, lower = t.lower;
-        if ((this.english && word.length < 2) || word.length > 48 || inProtected(start, end, ranges) || occupied2(start, end)) continue;
+        if (word.length < 2 || word.length > 48 || inProtected(start, end, ranges) || occupied2(start, end)) continue;
         if (/^\p{Lu}{2,}$/u.test(word) || this.correct(word.replace(/’/g, "'"))) continue;
         const before = text.slice(Math.max(0, start - 3), start);
         if (/^\p{Lu}/u.test(word) && start > 0 && !/[.!?]\s*$/.test(before) && !options.checkNames) continue;
@@ -257,7 +268,7 @@ export class ProofEngine {
           add(start, end, word, replacements, {
             id: 'hunspell', category: 'spelling',
             message: replacements.length ? 'This spelling is not in the active dictionaries.' : 'Unknown word. Add a name or specialist term to your dictionary.',
-            confidence: .88, source: this.english ? 'SCOWL / Hunspell + candidate models' : 'Language pack',
+            confidence: .88, source: this.english ? 'SCOWL / Hunspell + candidate models' : 'Hunspell dictionary',
           });
         }
       }
