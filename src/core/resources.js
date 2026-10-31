@@ -80,6 +80,31 @@ export function parseHunspell(aff,dic,options={}) {
 
 export function escapeRegex(s){ return s.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'); }
 
+// Rebuild a check payload out of clone-friendly primitives only. Browsers
+// refuse to structured-clone unexpected values (class instances, functions,
+// huge exotic objects) and the failure message is opaque to the user. The
+// first post attempt always sends the payload as-is; this is the retry.
+export function sanitizeCheckPayload(message) {
+  const pack = p => ({
+    id: String(p?.id ?? ''), name: String(p?.name ?? ''), language: String(p?.language ?? ''),
+    kind: p?.kind === 'hunspell' ? 'hunspell' : p?.kind === 'plugin' ? 'plugin' : 'wordlist',
+    enabled: !!p?.enabled, direction: p?.direction === 'rtl' ? 'rtl' : 'ltr',
+    words: Array.isArray(p?.words) ? p.words.filter(w => typeof w === 'string') : [],
+    rules: Array.isArray(p?.rules) ? p.rules.map(r => ({
+      id: String(r?.id ?? ''), find: String(r?.find ?? ''), replace: String(r?.replace ?? ''),
+      message: String(r?.message ?? ''), category: r?.category,
+      confidence: Number(r?.confidence) || .9, caseSensitive: !!r?.caseSensitive,
+    })) : [],
+    aff: typeof p?.aff === 'string' ? p.aff : undefined,
+    dic: typeof p?.dic === 'string' ? p.dic : undefined,
+  });
+  return {
+    ...message,
+    packs: Array.isArray(message?.packs) ? message.packs.map(pack) : [],
+    personal: Array.isArray(message?.personal) ? message.personal.filter(w => typeof w === 'string') : [],
+  };
+}
+
 export function compilePackRules(packs,language) {
   return packs.filter(p=>p.enabled && (p.language===language || p.language===language.split('-')[0])).flatMap(p=>p.rules.map(r=>({
     id:`${p.id}:${r.id}`,category:r.category,pattern:new RegExp(`(?<![\\p{L}\\p{N}_])${escapeRegex(r.find)}(?![\\p{L}\\p{N}_])`,r.caseSensitive?'gu':'giu'),replacement:r.replace,message:r.message,confidence:r.confidence,source:p.name,plugin:true

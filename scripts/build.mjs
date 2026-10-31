@@ -2,7 +2,7 @@
 // dist/data, derives the frequency index, and writes honest meta counts.
 import {build} from 'esbuild';
 import {readFile, writeFile, mkdir, rm, cp, readdir, stat} from 'node:fs/promises';
-import {readFileSync, existsSync, readdirSync} from 'node:fs';
+import {readFileSync, existsSync, readdirSync, statSync} from 'node:fs';
 import {gunzipSync, gzipSync} from 'node:zlib';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
@@ -24,7 +24,7 @@ await mkdir('dist/vendor/ocr/lang', {recursive: true});
 await mkdir('dist/vendor/pdf', {recursive: true});
 await mkdir('dist/licenses', {recursive: true});
 for (const file of ['index.html', 'style.css', 'favicon.svg']) await cp(`src/${file}`, `dist/${file}`);
-for (const [name, pkg] of [['en-US', 'dictionary-en'], ['en-GB', 'dictionary-en-gb']]) for (const ext of ['aff', 'dic']) await cp(`node_modules/${pkg}/index.${ext}`, `dist/data/${name}.${ext}`);
+for (const [name, pkg] of [['en-US', 'dictionary-en'], ['en-GB', 'dictionary-en-gb']]) for (const ext of ['aff', 'dic']) await writeFile(`dist/data/${name}.${ext}.gz`, gzipSync(readFileSync(`node_modules/${pkg}/index.${ext}`), {level: 9}));
 
 // 1b) Bundled language dictionaries: Hunspell aff+dic pairs, gzipped so the
 // worker can decompress them on demand (only the selected language loads).
@@ -42,6 +42,22 @@ const LANGUAGE_PACKS = [
   ['sl', 'Slovenian', 'dictionary-sl'], ['sr', 'Serbian', 'dictionary-sr'], ['sv', 'Swedish', 'dictionary-sv'],
   ['tr', 'Turkish', 'dictionary-tr'], ['uk', 'Ukrainian', 'dictionary-uk'], ['vi', 'Vietnamese', 'dictionary-vi'],
 ];
+
+// 1a) Per-language frequency ranking (OpenSubtitles 2018 top-50k, CC BY-SA
+// 4.0), vendored by scripts/fetch-frequency.sh (one list per language code;
+// Norwegian Bokmål and Nynorsk each ship the shared Norwegian list).
+// Languages without an OpenSubtitles list (e.g. Irish, Esperanto) simply run
+// without frequency ranking, exactly like before.
+await mkdir('dist/data/frequency', {recursive: true});
+const WORD_FILTER_UNICODE = /^[\p{L}][\p{L}'’-]{0,30}$/u;
+const frequencyCount = {};
+for (const code of [...LANGUAGE_PACKS.map(([c]) => c), 'en-US']) {
+  const file = `vendor/frequency/${code === 'en-US' ? 'en' : code}_50k.txt`;
+  if (!existsSync(file)) { frequencyCount[code] = 0; continue; }
+  const words = readFileSync(file, 'utf8').split('\n').map(line => line.split(' ')[0].trim()).filter(w => WORD_FILTER_UNICODE.test(w)).slice(0, 50000);
+  frequencyCount[code] = words.length;
+  if (words.length) await writeFile(`dist/data/frequency/${code}.json.gz`, gzipSync(Buffer.from(JSON.stringify({source: 'OpenSubtitles 2018 top-50k (CC BY-SA 4.0)', words})), {level: 9}));
+}
 await mkdir('dist/data/lang', {recursive: true});
 const languages = [];
 for (const [code, name, pkg] of LANGUAGE_PACKS) {
@@ -59,7 +75,7 @@ for (const [code, name, pkg] of LANGUAGE_PACKS) {
   const dicText = readFileSync(`${base}/index.dic`, 'utf8');
   const header = Number(dicText.split('\n')[0].trim());
   const words = Number.isFinite(header) && header > 0 ? header : Math.max(0, dicText.split('\n').length - 1);
-  languages.push({code, name, words, license, source: `https://www.npmjs.com/package/${pkg}`});
+  languages.push({code, name, words, frequencyWords: frequencyCount[code] || 0, license, source: `https://www.npmjs.com/package/${pkg}`});
 }
 languages.sort((a, b) => a.code.localeCompare(b.code));
 
@@ -96,11 +112,9 @@ const corrections = {}, correctionsGB = {};
 await writeFile('dist/data/corrections.json', JSON.stringify(corrections));
 await writeFile('dist/data/corrections-en-GB.json', JSON.stringify(correctionsGB));
 
-// 2) Frequency index from the vendored OpenSubtitles top-50k list.
-const frequencyWords = readFileSync('vendor/frequency/en_50k.txt', 'utf8')
-  .split('\n').map(line => line.split(' ')[0].trim())
-  .filter(w => /^[a-z][a-z'-]{0,30}$/.test(w));
-await writeFile('dist/data/frequency.json', JSON.stringify({source: 'OpenSubtitles 2018 top-50k (CC BY-SA 4.0)', words: frequencyWords}));
+// 2) The English frequency list is generated with every other language in
+// step 1a; its size feeds the meta panel.
+const frequencyWords = frequencyCount['en-US'] || 0;
 
 // 3) Domain dictionaries from the CSpell suite (txt, gz, and trie formats).
 const DOMAIN_PACKAGES = [
@@ -188,7 +202,7 @@ const contextEntries = contextModel.sets.reduce((n, s) => n + Object.keys(s.cont
 
 // 6) Meta counts (displayed in the UI; all real).
 const stats = ruleCounts();
-const dictionaryEntries = Number(readFileSync('dist/data/en-US.dic', 'utf8').split('\n')[0]);
+const dictionaryEntries = Number(gunzipSync(readFileSync('dist/data/en-US.dic.gz')).toString('utf8').split('\n')[0]);
 const meta = {
   version: '2.0.0',
   builtAt: new Date().toISOString(),
@@ -206,7 +220,8 @@ const meta = {
   dictionaryEntries,
   domainDictionaries: Object.keys(dictionaries).length,
   domainWords: domainWordCount,
-  frequencyWords: frequencyWords.length,
+  frequencyWords,
+  frequencyLanguages: Object.values(frequencyCount).filter(n => n > 0).length,
   algorithms: registeredAlgorithms().length,
   algorithmFamilies: algorithmFamilies().length,
   readabilityFormulas: READABILITY_FORMULAS.length,
@@ -251,10 +266,54 @@ await cp('THIRD_PARTY_NOTICES.md', 'dist/THIRD_PARTY_NOTICES.md');
 
 // 10) Service worker cache manifest.
 const core = ['./', './index.html', './style.css', './app.js', './worker.js', './favicon.svg',
-  ...['en-US.aff', 'en-US.dic', 'en-GB.aff', 'en-GB.dic', 'corrections.json', 'corrections-en-GB.json', 'frequency.json', 'context-model.json', 'meta.json'].map(f => './data/' + f),
+  ...['en-US.aff.gz', 'en-US.dic.gz', 'en-GB.aff.gz', 'en-GB.dic.gz', 'corrections.json', 'corrections-en-GB.json', 'context-model.json', 'meta.json'].map(f => './data/' + f),
+  ...(existsSync('dist/data/frequency') ? await readdir('dist/data/frequency') : []).map(f => './data/frequency/' + f),
   ...(await readdir('dist/chunks')).map(f => './chunks/' + f),
   ...(await readdir('dist/fonts')).map(f => './fonts/' + f)];
 const cacheId = 'proofloom-' + Date.now().toString(36);
 await writeFile('dist/sw.js', `const CACHE=${JSON.stringify(cacheId)};const CORE=${JSON.stringify(core)};self.addEventListener('install',e=>{e.waitUntil(caches.open(CACHE).then(c=>c.addAll(CORE)));});self.addEventListener('activate',e=>{e.waitUntil(caches.keys().then(keys=>Promise.all(keys.filter(k=>k.startsWith('proofloom-')&&k!==CACHE).map(k=>caches.delete(k)))));self.clients.claim();});self.addEventListener('fetch',e=>{if(e.request.method!=='GET'||new URL(e.request.url).origin!==self.location.origin)return;if(e.request.mode==='navigate'){e.respondWith(fetch(e.request).catch(()=>caches.match(new URL('./index.html',self.registration.scope))));return;}e.respondWith(caches.match(e.request).then(c=>c||fetch(e.request).then(r=>{if(r.ok&&!r.headers.get('content-type')?.includes('text/html')){const copy=r.clone();caches.open(CACHE).then(cache=>cache.put(e.request,copy)).catch(()=>{});}return r;})));});`);
 await writeFile('dist/.nojekyll', '');
-console.log(`Built Proofloom v2: ${meta.rules.toLocaleString()} rules (${meta.rulesDialect.toLocaleString()} dialect variants), ${meta.algorithms} algorithms, ${meta.corrections.toLocaleString()} correction mappings, ${meta.domainWords.toLocaleString()} domain words in ${meta.domainDictionaries} dictionaries, ${meta.frequencyWords.toLocaleString()} frequency-ranked words, ${meta.confusionSetsModelled} corpus-modelled confusion sets, ${languages.length} bundled language dictionaries.`);
+
+// 11) Single-file standalone build (dist/proofloom-standalone.html). Opens
+// straight from disk with a double click: browsers block module scripts and
+// fetch() on file:// pages, so the whole checker worker — including every
+// dictionary — ships as one inline Blob-worker string. OCR and PDF import
+// stay server-only; everything else works offline.
+{
+  await mkdir('scripts/standalone', {recursive: true});
+  // 11a) Embedded data for the worker (base64 gz + plain JSON/text).
+  const data = {};
+  for (const file of ['en-US.aff.gz', 'en-US.dic.gz', 'en-GB.aff.gz', 'en-GB.dic.gz']) data[`./data/${file}`] = readFileSync(`dist/data/${file}`).toString('base64');
+  for (const file of ['corrections.json', 'corrections-en-GB.json', 'context-model.json', 'meta.json']) data[`./data/${file}`] = readFileSync(`dist/data/${file}`, 'utf8');
+  data['./data/domain-dictionaries.json.gz'] = readFileSync('dist/data/domain-dictionaries.json.gz').toString('base64');
+  for (const file of readdirSync('dist/data/lang')) data[`./data/lang/${file}`] = readFileSync(`dist/data/lang/${file}`).toString('base64');
+  for (const file of readdirSync('dist/data/frequency')) data[`./data/frequency/${file}`] = readFileSync(`dist/data/frequency/${file}`).toString('base64');
+  await writeFile('scripts/standalone/data-worker.js', `// Generated by scripts/build.mjs — embedded dictionary data for the standalone build.\nglobalThis.PROOFLOOM_DATA=${JSON.stringify(data)};\n`);
+  await writeFile('scripts/standalone/data-meta.js', `// Generated by scripts/build.mjs — embedded meta.json for the standalone build.\nglobalThis.PROOFLOOM_DATA=${JSON.stringify({'./data/meta.json': data['./data/meta.json']})};\n`);
+  await writeFile('scripts/standalone/worker.js', `import './data-worker.js';\nimport '../../src/worker.js';\n`);
+  await writeFile('scripts/standalone/app.js', `import './data-meta.js';\nimport '../../src/app.js';\n`);
+  // 11b) Bundle both as classic IIFE scripts (no modules on file://).
+  await build({entryPoints: {'standalone-worker': 'scripts/standalone/worker.js', 'standalone-app': 'scripts/standalone/app.js'}, outdir: 'dist/.standalone', bundle: true, format: 'iife', platform: 'browser', minify: true, target: ['es2022'], legalComments: 'none', logLevel: 'warning'});
+  const workerSource = readFileSync('dist/.standalone/standalone-worker.js', 'utf8');
+  const appSource = readFileSync('dist/.standalone/standalone-app.js', 'utf8');
+  await rm('dist/.standalone', {recursive: true, force: true});
+  // 11c) Assemble the HTML: inline CSS with fonts as data URIs, inline scripts.
+  let css = readFileSync('src/style.css', 'utf8');
+  for (const file of readdirSync('dist/fonts')) css = css.replaceAll(`url('./fonts/${file}')`, `url(data:font/woff2;base64,${readFileSync(`dist/fonts/${file}`).toString('base64')})`);
+  const favicon = `data:image/svg+xml;base64,${readFileSync('src/favicon.svg').toString('base64')}`;
+  const escape = source => JSON.stringify(source).replace(/</g, '\\u003c').replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
+  let html = readFileSync('src/index.html', 'utf8');
+  // Replacement FUNCTIONS everywhere: string replacements expand $&/$'/$1
+  // sequences, and bundle code is full of them.
+  html = html.replace(/<link rel="icon"[^>]*\/>/, () => `<link rel="icon" href="${favicon}"/>`);
+  html = html.replace('<link rel="stylesheet" href="./style.css"/>', () => `<style>\n${css}\n</style>`);
+  // Classic inline scripts run immediately: inject them at the END of <body>
+  // so the sidebar, dialog, and inputs already exist when the app boots
+  // (the served build gets deferral from type="module"; here placement does it).
+  html = html.replace('<script type="module" src="./app.js"></script>', () => '');
+  html = html.replace('</body>', () =>
+    `  <script>globalThis.PROOFLOOM_WORKER_SOURCE=${escape(workerSource)};</script>\n  <script>${appSource.replace(/<\/script/gi, '<\\/script')}</script>\n</body>`);
+  await writeFile('dist/proofloom-standalone.html', html);
+  console.log(`Standalone build: dist/proofloom-standalone.html (${(statSync('dist/proofloom-standalone.html').size / 1048576).toFixed(1)} MB, opens from file://).`);
+}
+console.log(`Built Proofloom v2: ${meta.rules.toLocaleString()} rules (${meta.rulesDialect.toLocaleString()} dialect variants), ${meta.algorithms} algorithms, ${meta.corrections.toLocaleString()} correction mappings, ${meta.domainWords.toLocaleString()} domain words in ${meta.domainDictionaries} dictionaries, ${meta.frequencyWords.toLocaleString()} frequency-ranked words in ${meta.frequencyLanguages} languages, ${meta.confusionSetsModelled} corpus-modelled confusion sets, ${languages.length} bundled language dictionaries.`);

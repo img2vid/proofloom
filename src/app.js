@@ -3,7 +3,7 @@ import {icon,e,hydrateIcons,btn,relativeDate} from './ui.js';
 import {editorView,assistantView,documentsView,documentCards,resourcesView,ocrView,pluginsView,settingsView} from './views.js';
 import {dbAll,dbPut,dbDelete} from './storage.js';
 import {applyEdits,metrics} from './core/checker.js';
-import {parseWordlist,parseHunspell,validatePlugin,validLanguage,MAX_RESOURCE_BYTES} from './core/resources.js';
+import {parseWordlist,parseHunspell,validatePlugin,validLanguage,MAX_RESOURCE_BYTES,sanitizeCheckPayload} from './core/resources.js';
 import {dictionaryAdapters,documentAdapters} from './extensions.js';
 import {remoteCheck,validateEndpoint} from './core/remote.js';
 import {importDocument,exportDocument,downloadBlob,MAX_TEXT_LENGTH} from './documents.js';
@@ -20,10 +20,36 @@ const currentDoc=()=>state.docs.find(d=>d.id===state.activeId)||state.docs[0];
 const currentChapter=()=>currentDoc()?.chapters[currentDoc().activeChapter||0];
 const currentText=()=>currentChapter()?.text||'';
 const historyKey=()=>`${currentDoc()?.id}:${currentDoc()?.activeChapter||0}`;
-let worker;
-try{worker=new Worker(new URL('./worker.js',import.meta.url),{type:'module'});}catch(error){state.workerError=error.message;}
+// The checker runs in a module worker next to the app. The single-file
+// standalone build instead ships the whole worker as a string and starts it
+// from a Blob URL — the only kind that browsers allow on file:// pages.
+function createCheckerWorker(){
+  if(globalThis.PROOFLOOM_WORKER_SOURCE){
+    try{return new Worker(URL.createObjectURL(new Blob([globalThis.PROOFLOOM_WORKER_SOURCE],{type:'text/javascript'})));}
+    catch(error){state.workerError=error.message;return null;}
+  }
+  try{return new Worker(new URL('./worker.js',import.meta.url),{type:'module'});}
+  catch(error){state.workerError=error.message;return null;}
+}
+let worker=createCheckerWorker();
 let activeImportOptions={};
 let bookWorker;
+
+// Browsers silently refuse to structured-clone unexpected payload values and
+// the raw error ("Too many properties to enumerate") is opaque. Retry once
+// with a sanitized payload before surfacing a clear message.
+function postCheck(target,payload){
+  try{target.postMessage(payload);return true;}
+  catch{
+    try{target.postMessage(sanitizeCheckPayload(payload));return true;}
+    catch(error){
+      state.checking=false;
+      state.workerError='This browser refused to hand the document to the checker ('+error.message+'). Disable large imported packs in Dictionaries & languages, then run the check again.';
+      renderAssistant();showEditorNotice();toast(state.workerError,true);
+      return false;
+    }
+  }
+}
 
 function toast(message,error=false,action){
   const element=document.createElement('div');element.className='toast'+(error?' error':'');element.textContent=message;
@@ -88,7 +114,12 @@ function showEditorNotice(){
   const doc=currentDoc();let text='';
   if(doc.importNote)text=`<div class="restoration-callout">${icon(doc.ocr?'scan':'info')}<span>${e(doc.importNote)}</span></div>`;
   if(!doc.language?.startsWith('en')&&!(state.meta?.languages||[]).some(l=>l.code===doc.language||l.code===doc.language.split('-')[0])&&!state.resources.some(p=>p.enabled&&(p.language===doc.language||p.language===doc.language.split('-')[0])))text+=`<div class="editor-warning">This language has no bundled dictionary or active resource pack. Add vocabulary and language rules in Dictionaries & languages.</div>`;
-  if(state.workerError)text+=`<div class="editor-warning">The local worker could not start. ${e(state.workerError)}. Serve this website over HTTPS or localhost; file:// is not supported.</div>`;
+  if(state.workerError){
+    const standalone=location.protocol==='file:';
+    text+=standalone
+      ?`<div class="editor-warning">The local checker could not start on a ${e(location.protocol)} page — browsers block worker scripts there. Open the single-file build (<strong>proofloom-standalone.html</strong>) instead, or serve this folder over HTTPS or localhost.</div>`
+      :`<div class="editor-warning">The local checker reported a problem: ${e(state.workerError)} Try reloading the page and running the check again. If it persists, disable large imported packs in Dictionaries &amp; languages.</div>`;
+  }
   n.innerHTML=text;
 }
 function visibleIssues(){return [...state.localIssues,...state.remoteIssues].filter(i=>!state.ignored.has(issueKey(i))).sort((a,b)=>a.start-b.start||b.confidence-a.confidence).filter((i,n,all)=>!all.slice(0,n).some(x=>x.start===i.start&&x.end===i.end&&x.replacements[0]===i.replacements[0]));}
@@ -152,7 +183,7 @@ function runCheck(){
   if(!text.trim()){state.localIssues=[];state.remoteIssues=[];state.checking=false;state.metrics=metrics(text,doc.language);state.readability=null;renderAssistant();renderHighlights();renderStats();return;}
   $('#check-label')&&($('#check-label').textContent='Checking…');
   renderAssistant();
-  worker.postMessage({type:'check',id:state.version,text,packs:state.resources,personal:state.settings.personal,options:{language:doc.language||state.settings.language,preset:state.settings.preset,ocr:doc.ocr,checkNames:state.settings.checkNames,dialectConsistency:state.settings.dialectConsistency,disabledRules:state.settings.disabledRules}});
+  postCheck(worker,{type:'check',id:state.version,text,packs:state.resources,personal:state.settings.personal,options:{language:doc.language||state.settings.language,preset:state.settings.preset,ocr:doc.ocr,checkNames:state.settings.checkNames,dialectConsistency:state.settings.dialectConsistency,disabledRules:state.settings.disabledRules}});
 }
 if(worker){
   worker.onmessage=({data})=>{
@@ -217,10 +248,11 @@ async function reviewBook(){
   if(state.bookReview?.running){renderBookReview();return;}
   const doc=currentDoc();await flushSave();
   const texts=doc.chapters.map(c=>c.text),review={documentId:doc.id,texts,results:[],completed:0,running:true,capped:false,at:Date.now()};state.bookReview=review;
-  bookWorker=new Worker(new URL('./worker.js',import.meta.url),{type:'module'});
+  bookWorker=createCheckerWorker();
+  if(!bookWorker){review.running=false;toast('The checker worker could not start: '+(state.workerError||'unknown error'),true);renderBookReview();return;}
   const options={language:doc.language,preset:state.settings.preset,ocr:doc.ocr,checkNames:state.settings.checkNames,dialectConsistency:state.settings.dialectConsistency,disabledRules:state.settings.disabledRules};
   let retained=0;
-  const sendNext=()=>{if(!review.running)return;if(review.completed>=texts.length){review.running=false;bookWorker.terminate();renderBookReview();return;}bookWorker.postMessage({type:'check',id:review.completed+1,text:texts[review.completed],packs:state.resources,personal:state.settings.personal,options});};
+  const sendNext=()=>{if(!review.running)return;if(review.completed>=texts.length){review.running=false;bookWorker.terminate();renderBookReview();return;}postCheck(bookWorker,{type:'check',id:review.completed+1,text:texts[review.completed],packs:state.resources,personal:state.settings.personal,options});};
   bookWorker.onmessage=({data})=>{
     if(data.type==='error'){review.running=false;bookWorker.terminate();toast('Book review stopped: '+data.message,true);renderBookReview();return;}
     if(data.type!=='result'||!review.running)return;
@@ -427,7 +459,7 @@ document.addEventListener('input',event=>{
 document.addEventListener('change',async event=>{
   const t=event.target;
   try{
-    if(t.id==='editor-language'){currentDoc().language=t.value;scheduleSave();render('editor');}
+    if(t.id==='editor-language'){if(!t.value)return;currentDoc().language=t.value;scheduleSave();render('editor');}
     else if(t.id==='writing-preset'){state.settings.preset=t.value;saveSettings();queueCheck(0);}
     else if(t.id==='chapter-select'){await flushSave();currentDoc().activeChapter=Number(t.value);state.ignored.clear();state.localIssues=[];state.remoteIssues=[];state.metrics={};render('editor');scheduleSave();}
     else if(t.dataset.replacementFor){state.choices[t.dataset.replacementFor]=Number(t.value);renderAssistant();}
@@ -476,8 +508,15 @@ async function init(){
   if(!state.docs.length){const doc=makeDoc('The art of noticing',SAMPLE_TEXT,{ocr:true,sourceType:'sample'});state.docs.push(doc);await persist('documents',doc);}
   state.activeId=state.docs.some(d=>d.id===state.settings.activeId)?state.settings.activeId:state.docs[0].id;
   for(const d of state.docs){d.language||=state.settings.language;d.activeChapter=Math.min(d.activeChapter||0,d.chapters.length-1);d.snapshots||=[];}
-  try{const r=await fetch(new URL('./data/meta.json',import.meta.url));if(r.ok)state.meta=await r.json();}catch{}
+  try{
+    const embeddedMeta=globalThis.PROOFLOOM_DATA?.['./data/meta.json'];
+    if(embeddedMeta)state.meta=JSON.parse(embeddedMeta);
+    else{const r=await fetch(new URL('./data/meta.json',import.meta.url));if(r.ok)state.meta=await r.json();}
+  }catch{}
   state.metrics=metrics(currentText(),currentDoc().language);render();
-  if('serviceWorker' in navigator)navigator.serviceWorker.register(new URL('./sw.js',import.meta.url),{scope:'./'}).catch(()=>{});
+  // The service worker only makes sense on a served origin (it would also
+  // throw on file:// pages and inside the standalone build, where
+  // import.meta.url is unavailable in a classic inline script).
+  if(!globalThis.PROOFLOOM_WORKER_SOURCE&&location.protocol!=='file:'&&'serviceWorker' in navigator)navigator.serviceWorker.register(new URL('./sw.js',import.meta.url),{scope:'./'}).catch(()=>{});
 }
 void init().catch(error=>{main.innerHTML=`<div class="panel"><h2>The workspace could not open.</h2><p>${e(error.message)} Reload this page to try again. If browser storage is unavailable, export any existing work before clearing site data.</p></div>`;toast(error.message,true);});

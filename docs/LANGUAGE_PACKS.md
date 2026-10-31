@@ -16,3 +16,15 @@ Imported base-language packs apply to regional variants. A specific variant pack
 Dictionary membership is not grammar analysis. A wordlist-only language can flag unfamiliar words but does not have morphological suggestion generation unless a Hunspell/provider engine supplies it. No English fallback is silently used for other languages.
 
 English OCR is bundled separately from proofreading. To recognize another script, supply appropriate Tesseract trained data and add an OCR document/provider extension using that model. Installing a spelling wordlist alone does not install an OCR model.
+
+## What the 36 built-in languages ship, and where the data comes from
+
+Every built-in language is built at `npm run build` time from locked npm packages — nothing is committed to `dist/`:
+
+1. **Hunspell dictionary** — the `dictionary-<code>` package (`node_modules/<pkg>/index.aff` + `index.dic`) is gzipped into `dist/data/lang/<code>.aff.gz` / `.dic.gz` and loaded on demand by the checker worker. The list lives in `LANGUAGE_PACKS` in `scripts/build.mjs`.
+2. **Frequency-ranked suggestions** — `vendor/frequency/<code>_50k.txt` (OpenSubtitles 2018 top-50k, CC BY-SA 4.0, fetched by `scripts/fetch-frequency.sh`) is compiled into `dist/data/frequency/<code>.json.gz`. The worker builds a word→rank map and the engine ranks every language's suggestions with the same weighted scorer English uses. Languages without an OpenSubtitles list (Irish, Esperanto) fall back to the dictionary's own suggestion order.
+3. **meta.json** advertises every language with its entry count, frequency count, license, and upstream source; the test suite asserts the advertised files actually exist.
+
+To add another built-in language: add the `dictionary-<code>` dependency to `package.json`, a row to `LANGUAGE_PACKS` in `scripts/build.mjs`, and (optionally) `vendor/frequency/<code>_50k.txt`. Then `npm run build` — `meta.json`, the language selector, the worker's on-demand loader, and the standalone single-file build pick it up automatically.
+
+Grammar, punctuation, style, confusion-set, dialect, and OCR rule tables remain English-only; no English fallback fires for other languages.

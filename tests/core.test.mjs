@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import en from 'dictionary-en';
 import gb from 'dictionary-en-gb';
 import {ProofEngine,applyEdits,metrics,chunks,protectedRanges,inProtected} from '../src/core/checker.js';
-import {validatePlugin,parseWordlist,parseHunspell,parseDelimited,validLanguage,compilePackRules} from '../src/core/resources.js';
+import {validatePlugin,parseWordlist,parseHunspell,parseDelimited,validLanguage,compilePackRules,sanitizeCheckPayload} from '../src/core/resources.js';
 import {validateEndpoint,remoteCheck} from '../src/core/remote.js';
 import {registerCheckProvider,extensionChecks,registerDictionaryAdapter,dictionaryAdapters} from '../src/extensions.js';
 import {exportDocument,parseRtf,escapeXML} from '../src/documents.js';
@@ -55,3 +55,10 @@ test('RTF extraction skips fonts and supports Unicode',()=>{assert.equal(parseRt
 test('XML output escapes input and strips invalid controls',()=>{assert.equal(escapeXML('<&\u0000>'),'&lt;&amp;&gt;');});
 test('DOCX export is a real archive with required document parts',async()=>{const blob=await exportDocument({title:'Test & title',chapters:[{title:'Text',text:'Hello <world>.\nAnother line.'}]},'docx');const zip=await JSZip.loadAsync(await blob.arrayBuffer());assert.ok(zip.file('[Content_Types].xml'));assert.ok(zip.file('_rels/.rels'));const xml=await zip.file('word/document.xml').async('string');assert.ok(xml.includes('Hello &lt;world&gt;.'));assert.ok(xml.includes('Test &amp; title'));});
 test('EPUB export has mimetype first, manifest, spine, navigation, and chapters',async()=>{const blob=await exportDocument({title:'A book',language:'en-US',chapters:[{title:'One',text:'First.'},{title:'Two',text:'Second.'}]},'epub');const bytes=new Uint8Array(await blob.arrayBuffer());assert.equal(new TextDecoder().decode(bytes.slice(30,38)),'mimetype');const zip=await JSZip.loadAsync(bytes);assert.equal(await zip.file('mimetype').async('string'),'application/epub+zip');assert.ok((await zip.file('EPUB/package.opf').async('string')).includes('idref="c1"'));assert.ok((await zip.file('EPUB/nav.xhtml').async('string')).includes('chapter-1.xhtml'));});
+test('check payload sanitizer keeps only clone-friendly primitives',()=>{const sanitized=sanitizeCheckPayload({type:'check',id:7,text:'hi',packs:[{id:'p1',name:'Pack',language:'fr',kind:'hunspell',enabled:true,words:['bonjour',42,null],rules:[{id:'r1',find:'foo',replace:'bar',message:'m',category:'style',confidence:'0.8',caseSensitive:1}],aff:'AFF',dic:'DIC',hostObject:{}}],personal:['ok',9]});
+assert.equal(sanitized.type,'check');assert.equal(sanitized.id,7);assert.equal(sanitized.text,'hi');
+const pack=sanitized.packs[0];assert.deepEqual(pack,{id:'p1',name:'Pack',language:'fr',kind:'hunspell',enabled:true,direction:'ltr',words:['bonjour'],rules:[{id:'r1',find:'foo',replace:'bar',message:'m',category:'style',confidence:.8,caseSensitive:true}],aff:'AFF',dic:'DIC'});
+assert.deepEqual(sanitized.personal,['ok']);
+// Structurally: the sanitizer output must itself structured-clone cleanly.
+assert.doesNotThrow(()=>structuredClone(sanitized));
+});

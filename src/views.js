@@ -6,6 +6,12 @@ export function languageOptions(ctx,selected){
   for(const l of ctx.meta?.languages||[])languages.set(l.code,`${l.name} · built in`);
   for(const language of languageExtensions())languages.set(language.code,language.name||language.code);
   for(const p of ctx.resources)if(!p.language.startsWith('en')&&!languages.has(p.language))languages.set(p.language,p.language+' · imported pack');
+  // A document in a region variant (fr-FR, de-AT) maps to a base bundled
+  // dictionary; show it under that language's name instead of a raw code.
+  if(selected&&selected.includes('-')&&!languages.has(selected)){
+    const base=selected.split('-')[0];
+    if(languages.has(base))languages.set(selected,`${languages.get(base).replace(' · built in','')} (${selected}) · built in`);
+  }
   if(!languages.has(selected))languages.set(selected,selected+' · custom');
   return [...languages].map(([code,name])=>`<option value="${e(code)}" ${code===selected?'selected':''}>${e(name)}</option>`).join('');
 }

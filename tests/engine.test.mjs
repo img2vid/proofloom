@@ -3,6 +3,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import {gunzipSync} from 'node:zlib';
 import en from 'dictionary-en';
 import {ProofEngine, applyEdits, metrics, ruleCounts} from '../src/core/checker.js';
 import {ALGORITHM_EXPORTS as A, registeredAlgorithms, algorithmFamilies} from '../src/core/algorithms/registry.js';
@@ -240,6 +241,8 @@ test('worker data files exist and agree with the meta counts',
   assert.ok(meta.domainWords > 100000);
   assert.ok(meta.corrections > 50000);
   assert.ok(meta.frequencyWords > 40000);
-  const frequencyData = JSON.parse(fs.readFileSync('dist/data/frequency.json', 'utf8'));
+  assert.ok(meta.frequencyLanguages >= 30, 'most bundled languages ship frequency lists');
+  const frequencyData = JSON.parse(gunzipSync(fs.readFileSync('dist/data/frequency/en-US.json.gz')).toString('utf8'));
   assert.equal(frequencyData.words.length, meta.frequencyWords);
+  assert.equal(frequencyData.words[0], 'you');
 });

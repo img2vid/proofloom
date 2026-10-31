@@ -133,8 +133,10 @@ export class ProofEngine {
           .map(s => ({word: s.word, score: s.score}));
       }
     } else {
-      // Bundled and imported Hunspell dictionaries rank their own
-      // morphology-aware candidates; keep their order as the ranking.
+      // Bundled and imported Hunspell dictionaries provide morphology-aware
+      // candidates. With a per-language frequency list (shipped for every
+      // bundled language), they are ranked by the same weighted scorer as
+      // English; otherwise their native order is kept.
       const candidates = [];
       const seen = new Set([lower]);
       const isKnown = w => {
@@ -143,13 +145,16 @@ export class ProofEngine {
       };
       for (const s of this.spell?.suggest(lower) || []) if (isKnown(s)) candidates.push(String(s));
       for (const s of this.extraSpells.flatMap(sp => sp.suggest(lower))) if (isKnown(s)) candidates.push(String(s));
-      scored = candidates.slice(0, 5).map((w, i) => ({word: w, score: .9 - i * .06}));
+      scored = candidates.length > 1 && this.frequency
+        ? rankSuggestions(word, candidates.map(w => ({word: w, distance: 1})), {limit: 5, frequencyRank: this.frequency})
+            .map(s => ({word: s.word, score: s.score}))
+        : candidates.slice(0, 5).map((w, i) => ({word: w, score: .9 - i * .06}));
     }
     const result = [...new Map(scored.map(s => [s.word.toLowerCase(), s])).values()]
       .sort((a, b) => b.score - a.score).slice(0, 5)
       .map(s => ({word: matchCase(s.word, word), score: s.score}));
     const words = result.map(s => s.word);
-    if (this.cache.size < 800) this.cache.set(lower, result);
+    if (this.cache.size < 800) this.cache.set(lower, words);
     return words;
   }
 
@@ -162,7 +167,9 @@ export class ProofEngine {
     if (this.domainWords) for (const word of this.domainWords) if (word.length >= 3 && word.length <= 16) vocabulary.add(word);
     const words = [...vocabulary].slice(0, 120000);
     this.deletionIndex = new DeletionIndex(words);
-    this.phoneticIndex = new PhoneticIndex(words.slice(0, 40000));
+    // Phonetic models are English/Latin-centric; restrict them to ASCII so
+    // Cyrillic, Greek, Arabic, and CJK vocabularies do not pollute the index.
+    this.phoneticIndex = new PhoneticIndex(words.filter(w => /^[a-z][a-z'-]*$/.test(w)).slice(0, 40000));
   }
 
   check(text, options = {}) {

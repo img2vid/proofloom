@@ -8,6 +8,7 @@ import de from 'dictionary-de';
 import es from 'dictionary-es';
 import ru from 'dictionary-ru';
 import {ProofEngine} from '../src/core/checker.js';
+import {bundledVariant} from '../src/core/languages.js';
 import {findIssueAtOffset, quickFixPosition} from '../src/core/quickfix.js';
 import {tokenizeWords} from '../src/core/algorithms/tokenize.js';
 
@@ -91,6 +92,34 @@ test('English-only rule tables do not fire for French documents', () => {
   assert.ok(issues.every(i => i.category !== 'grammar'), 'no English grammar rules fire');
 });
 
+test('bundled language mapping resolves variants, base codes, and unknown languages', () => {
+  const bundled = [{code: 'fr'}, {code: 'de'}, {code: 'pt'}];
+  assert.equal(bundledVariant('en-US', bundled).variant, 'en-US');
+  assert.equal(bundledVariant('en-GB', bundled).variant, 'en-GB');
+  assert.equal(bundledVariant('en-AU', bundled).variant, 'en-GB');
+  assert.equal(bundledVariant('fr', bundled).variant, 'fr');
+  assert.equal(bundledVariant('fr-FR', bundled).variant, 'fr');
+  assert.equal(bundledVariant('fr-CA', bundled).variant, 'fr');
+  assert.equal(bundledVariant('pt-BR', bundled).variant, 'pt');
+  assert.equal(bundledVariant('de-AT-1996', bundled).variant, 'de');
+  assert.ok(bundledVariant('fr-CA', bundled).bundled);
+  assert.equal(bundledVariant('zz', bundled).variant, 'none:zz');
+  assert.equal(bundledVariant('', bundled).variant, 'en-US');
+  assert.equal(bundledVariant(undefined, bundled).variant, 'en-US');
+});
+
+test('a per-language frequency list ranks non-English suggestions like English', () => {
+  // OpenSubtitles-style ranks: très and jour are common, vie is rarer.
+  const frequency = new Map([['très', 1], ['jour', 2], ['vie', 40000]]);
+  const engine = new ProofEngine(fr, {}, {frequency});
+  engine.configure({language: 'fr-FR'});
+  const suggestions = engine.suggest('treès');
+  assert.ok(suggestions.includes('très'), 'très is suggested');
+  const issues = engine.check('Un treès beau jour.', {language: 'fr-FR'});
+  const hit = issues.find(i => i.original === 'treès');
+  assert.ok(hit && hit.replacements[0] === 'très', 'the frequent form ranks first');
+});
+
 test('built dist ships every advertised language dictionary', {skip: distBuilt ? false : 'requires npm run build (dist/ is not built)'}, () => {
   const meta = JSON.parse(fs.readFileSync('dist/data/meta.json', 'utf8'));
   assert.ok(Array.isArray(meta.languages) && meta.languages.length >= 30, 'meta advertises at least 30 languages');
@@ -102,5 +131,10 @@ test('built dist ships every advertised language dictionary', {skip: distBuilt ?
     assert.ok(fs.existsSync(`dist/data/lang/${language.code}.aff.gz`), `${language.code} aff.gz exists`);
     assert.ok(language.words > 100, `${language.code} reports a real entry count`);
     assert.ok(language.name && language.license, `${language.code} carries name and license metadata`);
+    if (language.frequencyWords > 0) assert.ok(fs.existsSync(`dist/data/frequency/${language.code}.json.gz`), `${language.code} frequency list exists`);
   }
+  const withFrequency = meta.languages.filter(l => l.frequencyWords > 0).length;
+  assert.ok(withFrequency >= 30, `most bundled languages ship frequency lists (${withFrequency} do)`);
+  assert.ok(meta.frequencyLanguages >= 30, 'meta reports the frequency language count');
+  assert.ok(fs.existsSync('dist/proofloom-standalone.html'), 'single-file standalone build exists');
 });
