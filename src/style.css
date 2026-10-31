@@ -17,3 +17,12 @@
 @media(max-width:680px){.toolbar select,.ocr-toggle{font-size:9px}.toolbar-right{margin-left:auto}.nav-item{font-size:12px}.privacy-card p{font-size:11px}.suggestions-list{max-height:500px}.page-heading p{font-size:12px}.assistant-tabs button{font-size:11px}.paper-footer{font-size:9px}}
 @media(prefers-reduced-motion:reduce){*,*:before,*:after{animation:none!important;scroll-behavior:auto!important;transition:none!important}}
 @media print{.sidebar,.topbar,.page-heading,.toolbar,.assistant,.paper-header .paper-tools,.paper-footer,.paper-bottom,.app-footer,.chapter-control,.toast-region{display:none!important}.main-shell{margin:0;width:100%}main{padding:0}.paper{border:0;box-shadow:none}.editor-layout{display:block}.editor-surface{display:block;max-height:none;overflow:visible}.editor-surface textarea{display:none}.highlight-layer{color:#111;position:static;white-space:pre-wrap;padding:0;font-size:12pt;line-height:1.6}.highlight-layer mark{color:#111;background:transparent;border:0}.paper-header{padding:0 0 20px;border:0}.document-title{font-size:22pt}.draft-badge{display:none}}
+
+/* Readability panel (writing assistant) */
+.readability-panel{border:1px solid var(--border);border-radius:12px;background:var(--paper);margin:0 0 12px;overflow:hidden}
+.readability-panel summary{cursor:pointer;padding:10px 14px;font-weight:600;display:flex;align-items:center;gap:8px;list-style:none}
+.readability-panel summary::-webkit-details-marker{display:none}
+.readability-grid{display:flex;flex-wrap:wrap;gap:6px;padding:0 14px 10px}
+.readability-chip{display:inline-flex;flex-direction:column;gap:2px;border:1px solid var(--border);border-radius:8px;padding:5px 9px;font-size:11px;color:var(--muted);background:var(--bg)}
+.readability-chip strong{font-size:13px;color:var(--ink)}
+.readability-panel .view-note{padding:0 14px 12px;margin:0}

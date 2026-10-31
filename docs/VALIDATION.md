@@ -4,8 +4,8 @@ This build was validated on 31 October 2026. These checks establish implementati
 
 ## Automated checks
 
-- 58 Node.js tests passed.
-- Production bundle built successfully with 67,286 correction mappings, 84 original rules, and 49,568 American English dictionary stems.
+- 83 Node.js tests passed (58 original engine/resource/IO tests plus 25 new algorithm, rule-generation, confusion-context, dialect, readability, and data-count tests).
+- Production bundle built successfully with 67,286 correction mappings, 7,339 rules and dialect variants, 57 registered algorithms, 812,727 domain words in 38 dictionaries, 48,738 frequency-ranked words, and 67 corpus-modelled confusion sets.
 - Dependency audit reported zero known vulnerabilities in the installed production dependency tree at verification time.
 - DOCX and EPUB exports were generated, unpacked, and checked for required package/document/navigation parts and escaped text.
 - Positive and negative cases cover agreement, articles, common misspellings, Unicode offsets, protected code/URLs, OCR artifacts, safe/stale/overlapping edits, dialects, resource parsing, plugin validation, and bounded server responses.

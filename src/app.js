@@ -13,7 +13,7 @@ import {createId} from './id.js';
 const $=selector=>document.querySelector(selector);
 const main=$('#main'),dialog=$('#modal');
 const DEFAULTS={id:'main',language:'en-US',preset:'general',autoCheck:true,checkNames:false,dialectConsistency:true,personal:[],disabledRules:[],endpoint:'',remoteConsent:false,activeId:null};
-const state={docs:[],resources:[],settings:{...DEFAULTS},meta:{},activeId:null,route:'editor',version:0,issues:[],localIssues:[],remoteIssues:[],ignored:new Set(),choices:{},filter:'all',selectedId:null,checking:false,stale:false,capped:false,metrics:{},storage:true,saveTimer:0,checkTimer:0,undo:new Map(),redo:new Map(),lastTyped:0,lastDeleted:null,findOpen:false,importOcr:false,importBusy:false};
+const state={docs:[],resources:[],settings:{...DEFAULTS},meta:{},activeId:null,route:'editor',version:0,issues:[],localIssues:[],remoteIssues:[],ignored:new Set(),choices:{},filter:'all',selectedId:null,checking:false,stale:false,capped:false,metrics:{},readability:null,storage:true,saveTimer:0,checkTimer:0,undo:new Map(),redo:new Map(),lastTyped:0,lastDeleted:null,findOpen:false,importOcr:false,importBusy:false};
 const currentDoc=()=>state.docs.find(d=>d.id===state.activeId)||state.docs[0];
 const currentChapter=()=>currentDoc()?.chapters[currentDoc().activeChapter||0];
 const currentText=()=>currentChapter()?.text||'';
@@ -95,6 +95,7 @@ function renderAssistant(){
   state.issues=visibleIssues();if(!$('#assistant'))return;
   const list=$('#suggestions-list'),scroll=list?.scrollTop||0;
   $('#assistant').innerHTML=assistantView({...state,issues:state.issues});
+  hydrateIcons($('#assistant'));
   if($('#suggestions-list'))$('#suggestions-list').scrollTop=scroll;
 }
 function renderHighlights(){
@@ -119,7 +120,7 @@ function runCheck(){
   if(!worker||!currentDoc())return;
   state.checking=true;state.stale=false;state.capped=false;
   const text=currentText(),doc=currentDoc();
-  if(!text.trim()){state.localIssues=[];state.remoteIssues=[];state.checking=false;state.metrics=metrics(text,doc.language);renderAssistant();renderHighlights();renderStats();return;}
+  if(!text.trim()){state.localIssues=[];state.remoteIssues=[];state.checking=false;state.metrics=metrics(text,doc.language);state.readability=null;renderAssistant();renderHighlights();renderStats();return;}
   $('#check-label')&&($('#check-label').textContent='Checking…');
   renderAssistant();
   worker.postMessage({type:'check',id:state.version,text,packs:state.resources,personal:state.settings.personal,options:{language:doc.language||state.settings.language,preset:state.settings.preset,ocr:doc.ocr,checkNames:state.settings.checkNames,dialectConsistency:state.settings.dialectConsistency,disabledRules:state.settings.disabledRules}});
@@ -128,7 +129,7 @@ if(worker){
   worker.onmessage=({data})=>{
     if(data.id!==state.version)return;
     if(data.type==='result'){
-      state.localIssues=data.issues;state.checking=false;state.capped=data.capped;state.metrics=data.metrics;
+      state.localIssues=data.issues;state.checking=false;state.capped=data.capped;state.metrics=data.metrics;state.readability=data.readability||null;
       if(!state.selectedId||!data.issues.some(i=>i.id===state.selectedId))state.selectedId=data.issues[0]?.id;
       renderAssistant();renderHighlights();renderStats();$('#check-label')&&($('#check-label').textContent='Check text');
     }else if(data.type==='error'){state.checking=false;state.workerError=data.message;renderAssistant();showEditorNotice();toast('The local check could not finish: '+data.message,true);}
