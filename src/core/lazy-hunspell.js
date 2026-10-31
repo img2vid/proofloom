@@ -89,9 +89,12 @@ export class LazyHunspell {
         decoded = raw.split(',').flatMap(n => this.flags(this.aliases[Number(n) - 1] || ''));
       }
       const key = this.lower(stem);
-      const flags = this.words.get(key) || new Set();
-      for (const flag of decoded) flags.add(flag);
-      this.words.set(key, flags);
+      // Hunspell permits homonyms with distinct flags. Do not union them:
+      // e.g. German Haus has an independent valid entry and a separate
+      // NEEDAFFIX-only entry. Combining flags incorrectly invalidates Haus.
+      const entries = this.words.get(key) || [];
+      entries.push(new Set(decoded));
+      this.words.set(key, entries);
     }
   }
 
@@ -137,7 +140,7 @@ export class LazyHunspell {
     if (this.added.has(key)) return true;
     if (this.cache.has(key)) return this.cache.get(key);
     const direct = this.words.get(key);
-    let found = !!(direct && !direct.has(this.forbidden) && this.validPath(direct, []));
+    let found = !!direct?.some(flags => !flags.has(this.forbidden) && this.validPath(flags, []));
     if (!found && key.length >= 2 && key.length <= 80) {
       const stack = [{word: key, path: []}];
       const seen = new Set();
@@ -147,8 +150,8 @@ export class LazyHunspell {
         if (path.length >= MAX_DEPTH) continue;
         for (const {stem, rule} of this.reverse(candidate)) {
           const next = [...path, rule];
-          const flags = this.words.get(stem);
-          if (flags && !flags.has(this.forbidden) && this.validPath(flags, next)) {
+          const entries = this.words.get(stem);
+          if (entries?.some(flags => !flags.has(this.forbidden) && this.validPath(flags, next))) {
             found = true;
             break;
           }
