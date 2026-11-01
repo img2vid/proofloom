@@ -12,6 +12,7 @@ import {registeredAlgorithms, algorithmFamilies} from '../src/core/algorithms/re
 import {READABILITY_FORMULAS} from '../src/core/algorithms/readability.js';
 import {CONFUSION_SETS} from '../src/core/data/confusion-sets.js';
 import {DIALECT_SPELLING_PAIRS, DIALECT_VOCAB_PAIRS} from '../src/core/data/dialect.js';
+import {VENDOR_LANGUAGES, FREQUENCY_SOURCES, ensureVendorAssets} from './vendor-languages.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 process.chdir(root);
@@ -28,6 +29,10 @@ for (const [name, pkg] of [['en-US', 'dictionary-en'], ['en-GB', 'dictionary-en-
 
 // 1b) Bundled language dictionaries: Hunspell aff+dic pairs, gzipped so the
 // worker can decompress them on demand (only the selected language loads).
+// Sources: npm dictionary-* packages, plus languages vendored from the
+// LibreOffice/dictionaries repository (scripts/vendor-languages.mjs is the
+// single source of truth for the vendored table; the build fetches missing
+// files once so `npm run build` works out of the box).
 const LANGUAGE_PACKS = [
   ['bg', 'Bulgarian', 'dictionary-bg'], ['ca', 'Catalan', 'dictionary-ca'], ['cs', 'Czech', 'dictionary-cs'],
   ['da', 'Danish', 'dictionary-da'], ['de', 'German', 'dictionary-de'], ['el', 'Greek', 'dictionary-el'],
@@ -41,11 +46,31 @@ const LANGUAGE_PACKS = [
   ['ro', 'Romanian', 'dictionary-ro'], ['ru', 'Russian', 'dictionary-ru'], ['sk', 'Slovak', 'dictionary-sk'],
   ['sl', 'Slovenian', 'dictionary-sl'], ['sr', 'Serbian', 'dictionary-sr'], ['sv', 'Swedish', 'dictionary-sv'],
   ['tr', 'Turkish', 'dictionary-tr'], ['uk', 'Ukrainian', 'dictionary-uk'], ['vi', 'Vietnamese', 'dictionary-vi'],
+  // Additional npm dictionary packages.
+  ['be', 'Belarusian', 'dictionary-be'], ['br', 'Breton', 'dictionary-br'], ['bs', 'Bosnian', 'dictionary-bs'],
+  ['ca-valencia', 'Catalan (Valencia)', 'dictionary-ca-valencia'], ['cy', 'Welsh', 'dictionary-cy'],
+  ['el-polyton', 'Greek (Polytonic)', 'dictionary-el-polyton'], ['fo', 'Faroese', 'dictionary-fo'],
+  ['fur', 'Friulian', 'dictionary-fur'], ['fy', 'West Frisian', 'dictionary-fy'], ['gd', 'Scottish Gaelic', 'dictionary-gd'],
+  ['hy', 'Armenian', 'dictionary-hy'], ['hyw', 'Western Armenian', 'dictionary-hyw'], ['ia', 'Interlingua', 'dictionary-ia'],
+  ['ie', 'Interlingue', 'dictionary-ie'], ['isv', 'Interslavic', 'dictionary-isv'], ['ka', 'Georgian', 'dictionary-ka'],
+  ['la', 'Latin', 'dictionary-la'], ['lb', 'Luxembourgish', 'dictionary-lb'], ['ltg', 'Latgalian', 'dictionary-ltg'],
+  ['mk', 'Macedonian', 'dictionary-mk'], ['mn', 'Mongolian', 'dictionary-mn'], ['nds', 'Low German', 'dictionary-nds'],
+  ['ne', 'Nepali', 'dictionary-ne'], ['oc', 'Occitan', 'dictionary-oc'], ['ru-petr1708', 'Russian (Petrine orthography)', 'dictionary-ru-petr1708'],
+  ['sr-latn', 'Serbian (Latin script)', 'dictionary-sr-latn'], ['tk', 'Turkmen', 'dictionary-tk'],
+  // Vendored from LibreOffice/dictionaries (no npm package exists).
+  ...VENDOR_LANGUAGES.map(language => [language.code, language.name, `vendor/dictionaries/${language.code}`]),
 ];
 
-// 1a) Per-language frequency ranking (OpenSubtitles 2018 top-50k, CC BY-SA
-// 4.0), vendored by scripts/fetch-frequency.sh (one list per language code;
-// Norwegian Bokmål and Nynorsk each ship the shared Norwegian list).
+try {
+  await ensureVendorAssets();
+} catch (error) {
+  console.warn(`Vendored language data could not be fetched (${error.message}); affected languages are skipped. Run "node scripts/vendor-languages.mjs" with network access once.`);
+}
+
+// 1a) Per-language frequency ranking (OpenSubtitles top-50k, CC BY-SA 4.0),
+// vendored by scripts/vendor-languages.mjs and scripts/fetch-frequency.sh
+// (one list per language code; Norwegian Bokmål and Nynorsk each ship the
+// shared Norwegian list; the 2018 dump where available, 2016 otherwise).
 // Languages without an OpenSubtitles list (e.g. Irish, Esperanto) simply run
 // without frequency ranking, exactly like before.
 await mkdir('dist/data/frequency', {recursive: true});
@@ -56,26 +81,31 @@ for (const code of [...LANGUAGE_PACKS.map(([c]) => c), 'en-US']) {
   if (!existsSync(file)) { frequencyCount[code] = 0; continue; }
   const words = readFileSync(file, 'utf8').split('\n').map(line => line.split(' ')[0].trim()).filter(w => WORD_FILTER_UNICODE.test(w)).slice(0, 50000);
   frequencyCount[code] = words.length;
-  if (words.length) await writeFile(`dist/data/frequency/${code}.json.gz`, gzipSync(Buffer.from(JSON.stringify({source: 'OpenSubtitles 2018 top-50k (CC BY-SA 4.0)', words})), {level: 9}));
+  const dump = FREQUENCY_SOURCES[code]?.version ?? '2018';
+  if (words.length) await writeFile(`dist/data/frequency/${code}.json.gz`, gzipSync(Buffer.from(JSON.stringify({source: `OpenSubtitles ${dump} top-50k (CC BY-SA 4.0)`, words})), {level: 9}));
 }
 await mkdir('dist/data/lang', {recursive: true});
 const languages = [];
 for (const [code, name, pkg] of LANGUAGE_PACKS) {
-  const base = `node_modules/${pkg}`;
+  const vendor = VENDOR_LANGUAGES.find(l => l.code === code);
+  const base = vendor ? `vendor/dictionaries/${code}` : `node_modules/${pkg}`;
   if (!existsSync(`${base}/index.dic`) || !existsSync(`${base}/index.aff`)) {
-    console.warn(`Skipping ${pkg}: index.aff/index.dic missing (npm install first)`);
+    console.warn(`Skipping ${code}: index.aff/index.dic missing (npm install, or run "node scripts/vendor-languages.mjs")`);
     continue;
   }
   await writeFile(`dist/data/lang/${code}.aff.gz`, gzipSync(readFileSync(`${base}/index.aff`), {level: 9}));
   await writeFile(`dist/data/lang/${code}.dic.gz`, gzipSync(readFileSync(`${base}/index.dic`), {level: 9}));
-  let license = 'See package';
-  try { license = JSON.parse(readFileSync(`${base}/package.json`, 'utf8')).license || license; } catch { /* keep default */ }
+  let license = vendor?.license ?? 'See package';
+  let source = vendor ? `https://github.com/LibreOffice/dictionaries/tree/master/${vendor.folder}` : `https://www.npmjs.com/package/${pkg}`;
+  try {
+    if (!vendor) license = JSON.parse(readFileSync(`${base}/package.json`, 'utf8')).license || license;
+  } catch { /* keep default */ }
   // Most Hunspell .dic files start with the entry count; fall back to a line
   // count for packages whose header differs.
   const dicText = readFileSync(`${base}/index.dic`, 'utf8');
   const header = Number(dicText.split('\n')[0].trim());
   const words = Number.isFinite(header) && header > 0 ? header : Math.max(0, dicText.split('\n').length - 1);
-  languages.push({code, name, words, frequencyWords: frequencyCount[code] || 0, license, source: `https://www.npmjs.com/package/${pkg}`});
+  languages.push({code, name, words, frequencyWords: frequencyCount[code] || 0, license, source});
 }
 languages.sort((a, b) => a.code.localeCompare(b.code));
 

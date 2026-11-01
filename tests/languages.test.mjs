@@ -7,12 +7,16 @@ import fr from 'dictionary-fr';
 import de from 'dictionary-de';
 import es from 'dictionary-es';
 import ru from 'dictionary-ru';
+import cy from 'dictionary-cy';
+import la from 'dictionary-la';
 import {ProofEngine} from '../src/core/checker.js';
 import {bundledVariant} from '../src/core/languages.js';
+import {LazyHunspell} from '../src/core/lazy-hunspell.js';
 import {findIssueAtOffset, quickFixPosition} from '../src/core/quickfix.js';
 import {tokenizeWords} from '../src/core/algorithms/tokenize.js';
 
 const distBuilt = fs.existsSync('dist/data/meta.json');
+const vendorBuilt = fs.existsSync('vendor/dictionaries/hi/index.dic');
 
 test('quick-fix helper finds the narrowest issue at a clicked offset', () => {
   const issues = [
@@ -85,6 +89,48 @@ test('bundled Spanish dictionary offers the intended correction', () => {
   assert.ok(hit.replacements.includes('cocina'), 'cocina is among the suggestions');
 });
 
+test('newly bundled Welsh dictionary flags and corrects misspellings', () => {
+  const engine = new ProofEngine(new LazyHunspell(cy, {locale: 'cy-GB'}), {}, {});
+  engine.configure({language: 'cy-GB'});
+  assert.equal(engine.correct('cymdeithas'), true);
+  const issues = engine.check("Mae'r gymdeithas yn cymdeiths greadigol.", {language: 'cy-GB'});
+  const hit = issues.find(i => i.original === 'cymdeiths');
+  assert.ok(hit, 'cymdeiths is flagged');
+  assert.equal(hit.replacements[0], 'cymdeithas');
+});
+
+test('newly bundled Latin dictionary flags and corrects misspellings', () => {
+  const engine = new ProofEngine(new LazyHunspell(la, {locale: 'la'}), {}, {});
+  engine.configure({language: 'la'});
+  const issues = engine.check('Philosphia est magistra vitae.', {language: 'la'});
+  const hit = issues.find(i => i.original === 'Philosphia');
+  assert.ok(hit, 'Philosphia is flagged');
+  assert.ok(hit.replacements.includes('Philosophia') || hit.replacements.includes('philosophia'), 'philosophia is among the suggestions');
+});
+
+test('vendored Hindi dictionary flags and corrects misspellings', {skip: vendorBuilt ? false : 'requires vendored LibreOffice dictionaries (npm run build or node scripts/vendor-languages.mjs)'}, () => {
+  const aff = fs.readFileSync('vendor/dictionaries/hi/index.aff', 'utf8');
+  const dic = fs.readFileSync('vendor/dictionaries/hi/index.dic', 'utf8');
+  const engine = new ProofEngine(new LazyHunspell({aff, dic}, {locale: 'hi-IN'}), {}, {});
+  engine.configure({language: 'hi-IN'});
+  assert.equal(engine.correct('भाषा'), true);
+  const issues = engine.check('यह भाषाअ बहुत पुरानी है।', {language: 'hi-IN'});
+  const hit = issues.find(i => i.original === 'भाषाअ');
+  assert.ok(hit, 'भाषाअ is flagged');
+  assert.ok(hit.replacements.includes('भाषा'), 'भाषा is among the suggestions');
+});
+
+test('vendored Arabic dictionary flags misspellings with suggestions', {skip: vendorBuilt ? false : 'requires vendored LibreOffice dictionaries (npm run build or node scripts/vendor-languages.mjs)'}, () => {
+  const aff = fs.readFileSync('vendor/dictionaries/ar/index.aff', 'utf8');
+  const dic = fs.readFileSync('vendor/dictionaries/ar/index.dic', 'utf8');
+  const engine = new ProofEngine(new LazyHunspell({aff, dic}, {locale: 'ar'}), {}, {});
+  engine.configure({language: 'ar'});
+  const issues = engine.check('هذه مدرسةة كبيرة.', {language: 'ar'});
+  const hit = issues.find(i => i.original === 'مدرسةة');
+  assert.ok(hit, 'المدرسةة is flagged');
+  assert.ok(hit.replacements.length > 0, 'at least one suggestion is offered');
+});
+
 test('English-only rule tables do not fire for French documents', () => {
   const engine = new ProofEngine(fr, {}, {});
   engine.configure({language: 'fr-FR'});
@@ -93,7 +139,7 @@ test('English-only rule tables do not fire for French documents', () => {
 });
 
 test('bundled language mapping resolves variants, base codes, and unknown languages', () => {
-  const bundled = [{code: 'fr'}, {code: 'de'}, {code: 'pt'}];
+  const bundled = [{code: 'fr'}, {code: 'de'}, {code: 'pt'}, {code: 'hi'}, {code: 'ca'}, {code: 'ca-valencia'}, {code: 'sr'}, {code: 'sr-latn'}, {code: 'el-polyton'}];
   assert.equal(bundledVariant('en-US', bundled).variant, 'en-US');
   assert.equal(bundledVariant('en-GB', bundled).variant, 'en-GB');
   assert.equal(bundledVariant('en-AU', bundled).variant, 'en-GB');
@@ -103,6 +149,13 @@ test('bundled language mapping resolves variants, base codes, and unknown langua
   assert.equal(bundledVariant('pt-BR', bundled).variant, 'pt');
   assert.equal(bundledVariant('de-AT-1996', bundled).variant, 'de');
   assert.ok(bundledVariant('fr-CA', bundled).bundled);
+  assert.equal(bundledVariant('hi-IN', bundled).variant, 'hi');
+  assert.equal(bundledVariant('hi', bundled).variant, 'hi');
+  assert.equal(bundledVariant('ca-valencia', bundled).variant, 'ca-valencia');
+  assert.equal(bundledVariant('ca-ES-valencia', bundled).variant, 'ca');
+  assert.equal(bundledVariant('sr-Latn', bundled).variant, 'sr-latn');
+  assert.equal(bundledVariant('sr', bundled).variant, 'sr');
+  assert.equal(bundledVariant('el-Polyton', bundled).variant, 'el-polyton');
   assert.equal(bundledVariant('zz', bundled).variant, 'none:zz');
   assert.equal(bundledVariant('', bundled).variant, 'en-US');
   assert.equal(bundledVariant(undefined, bundled).variant, 'en-US');
@@ -122,7 +175,7 @@ test('a per-language frequency list ranks non-English suggestions like English',
 
 test('built dist ships every advertised language dictionary', {skip: distBuilt ? false : 'requires npm run build (dist/ is not built)'}, () => {
   const meta = JSON.parse(fs.readFileSync('dist/data/meta.json', 'utf8'));
-  assert.ok(Array.isArray(meta.languages) && meta.languages.length >= 30, 'meta advertises at least 30 languages');
+  assert.ok(Array.isArray(meta.languages) && meta.languages.length >= 80, 'meta advertises the expanded language set');
   const codes = new Set();
   for (const language of meta.languages) {
     assert.ok(!codes.has(language.code), 'language codes are unique');
