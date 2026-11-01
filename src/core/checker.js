@@ -6,6 +6,7 @@
 //  - sentence-level style analyzers and readability statistics
 //  - OCR restoration heuristics
 import nspell from 'nspell';
+import {LazyHunspell} from './lazy-hunspell.js';
 import {REGEX_RULES, LITERAL_RULES, LITERAL_TRIGGER_INDEX, matchCase, replacementFor, ruleCounts, CONFUSION_SETS} from './rules/index.js';
 import {compilePackRules} from './resources.js';
 import {matchLiteralRules} from './rules/literal.js';
@@ -50,7 +51,7 @@ const SUGGESTION_BUDGET = 160;
 
 export class ProofEngine {
   constructor(dictionary, corrections = {}, options = {}) {
-    this.spell = dictionary ? nspell(dictionary) : null;
+    this.spell = dictionary ? (typeof dictionary.correct === 'function' && typeof dictionary.suggest === 'function' ? dictionary : nspell(dictionary)) : null;
     for (const word of EXTRA_WORDS) this.spell?.add(word);
     this.corrections = corrections;
     this.cache = new Map();
@@ -78,7 +79,7 @@ export class ProofEngine {
     this.extraSpells = [];
     for (const p of packs.filter(p => p.enabled && (p.language === language || p.language === language.split('-')[0]))) {
       for (const word of p.words || []) this.wordlist.add(word.toLocaleLowerCase(language));
-      if (p.kind === 'hunspell') try { this.extraSpells.push(nspell({aff: p.aff, dic: p.dic})); } catch { /* surface forms remain available */ }
+      if (p.kind === 'hunspell') try { this.extraSpells.push(new LazyHunspell({aff: p.aff, dic: p.dic}, {locale: language})); } catch { /* surface forms remain available */ }
     }
     this.pluginRules = compilePackRules(packs, language);
     this.cache.clear();
@@ -160,7 +161,9 @@ export class ProofEngine {
 
   // Build the candidate indexes once per dictionary variant.
   buildIndexes() {
-    if (this.deletionIndex) return;
+    // Non-English dictionaries already provide lazy suggestions; do not build
+    // the English-only 120k-word candidate indexes for every language.
+    if (!this.english || this.deletionIndex) return;
     const vocabulary = new Set();
     for (const list of Object.values(this.corrections)) for (const w of list) if (/^[a-z]+$/.test(w)) vocabulary.add(w.toLowerCase());
     if (this.frequency) for (const word of this.frequency.keys()) if (word.length >= 2 && word.length <= 18) vocabulary.add(word);
