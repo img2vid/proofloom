@@ -1,0 +1,1074 @@
+From 0556e8ad1ccd6a9a3aeccd313670f1293594d6e4 Mon Sep 17 00:00:00 2001
+From: Proofloom Contributor <proofloom-contributor@users.noreply.github.com>
+Date: Sun, 1 Nov 2026 05:02:45 +0000
+Subject: [PATCH] Accept inflections and declensions of known words in every
+ language
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Unknown words no longer become spelling errors when they decompose
+into a known root plus a plausible ending for the document language,
+and when nothing else fits, suggestions offer the main root form
+(사랑은의 -> 사랑). This covers wordlist-only dictionaries, personal
+lists, imported packs, and the gaps inside bundled affix tables —
+dictionary-ko lists verb conjugations but no nominal particles, so
+사랑은 used to be flagged even though 사랑 is a dictionary word.
+
+- src/core/data/inflections.js: per-language inflection tables —
+  suffix strips (case endings, plural markers, verb endings), ending
+  swaps for velar/y/umlaut alternations (книги -> книга, studies ->
+  study, wolves -> wolf), and clitic prefixes (Arabic وال -> ...),
+  with curated tables for ~40 languages and aliases onto close
+  relatives (nds -> de, af -> nl, sr-latn -> hr, ckb -> ar, ...).
+  Languages without a curated table fall back by script (Latin,
+  Cyrillic, Arabic, Devanagari, Hangul, Greek, Hebrew, Georgian), so
+  the mechanism reaches all 86 bundled languages and user packs.
+- src/core/morphology.js: bounded analyzer (max depth per language,
+  24-stem frontier, LRU cache in the engine) with false-positive
+  controls: function-word guards ("thes", "les"), doubled-boundary
+  rejection ("walkss"), strict -es only after sibilants/o ("walkes"
+  stays wrong), consonant+y -> -ies/-ied ("studys"), silent-e rules
+  ("makeing", "makeed" stay wrong; "making", "loved" resolve), and
+  a verb gate that rejects un-doubled stems when the bare stem is
+  itself a word (run -> running, so "runing" stays flagged). Verb
+  endings attach only at depth one; English stays single-step.
+- src/core/checker.js: correct() consults the analyzer after every
+  dictionary has rejected a word; suggest() falls back to the root
+  form when no other candidate exists. Always-on: rich dictionaries
+  accept their inflections through their own affix data first, so
+  the analyzer only ever sees words every dictionary rejected.
+- tests/morphology.test.mjs: 11 tests — variant/alias/script
+  resolution for 80 language codes, root resolution for English,
+  German, Turkish, Hungarian, Russian, Korean, Arabic, Hindi,
+  Spanish and Dutch chains, typo look-alike rejection, wordlist-only
+  and bundled-dictionary engines, root-form suggestions, and a
+  bounded-analysis loop.
+
+npm test: 128 passing. npm run build unchanged at 86 dictionaries.
+---
+ README.md                    |   1 +
+ src/core/checker.js          |  41 ++-
+ src/core/data/inflections.js | 466 +++++++++++++++++++++++++++++++++++
+ src/core/morphology.js       | 198 +++++++++++++++
+ tests/morphology.test.mjs    | 231 +++++++++++++++++
+ 5 files changed, 936 insertions(+), 1 deletion(-)
+ create mode 100644 src/core/data/inflections.js
+ create mode 100644 src/core/morphology.js
+ create mode 100644 tests/morphology.test.mjs
+
+diff --git a/README.md b/README.md
+index dcdf35d..3886c2b 100644
+--- a/README.md
++++ b/README.md
+@@ -9,6 +9,7 @@ A complete, static proofreading and OCR restoration website designed for GitHub
+ - **67,000+ spelling-correction mappings** from CSpell's common-misspellings data (US and GB variants), plus **810,000+ domain dictionary words** from 38 bundled CSpell dictionaries (software terms, companies, programming languages, cloud platforms, medical and scientific vocabulary, gaming, licenses and more), shipped gzipped and decompressed in the worker.
+ - **Corpus-derived context model for real-word errors**: "their/there/they're"-style confusions are disambiguated by the surrounding words using before/after statistics mined from 3.7 million words of public-domain literature (32 Project Gutenberg classics), combined with grammatical pattern tests for 138 confusion sets.
+ - **Frequency-ranked suggestions in 50 languages** (OpenSubtitles top-50k, CC BY-SA — one ranked list per bundled language that has one, up to 50,000 words each): every language's spelling suggestions are ranked by real corpus frequency with the same weighted scorer as English, not just dictionary order.
++- **Inflection-aware spelling across all 86 languages**: a generative morphology layer (`src/core/morphology.js` with per-language tables in `src/core/data/inflections.js`) accepts inflected, declined, and conjugated forms of known words — English plurals and verb forms with doubling/silent-e awareness, German umlaut + declension chains (Häusern → Haus), Cyrillic case and velar alternations (книги → книга), Romance verb reconstructions (hablando → hablar), Turkish agglutination (evlerimdeki → ev), Korean particles (사랑은 → 사랑), Arabic clitics (والكتابات → كتاب), Hindi, Hungarian, Dutch, the Nordic languages, Georgian, Armenian, Hebrew, Greek, and script fallbacks for everything else, including user wordlists. Guard lists keep function-word stems ("thes", "les") out, and typo look-alikes ("runing", "walkeded", "studys", "walkes") stay flagged. When an unknown word does decompose, suggestions offer the main root form (사랑은의 → 사랑).
+ - **Ten readability formulas** (Flesch Reading Ease, Flesch-Kincaid, Gunning Fog, SMOG, Coleman-Liau, ARI, Linsear Write, Dale-Chall, FORCAST, Spache) with Dale-Chall and Spache familiar-word lists, displayed in a readability panel.
+ - **Sentence-level style analysis**: sentence-length variance, repeated sentence starts, adverb density, nominalization and weasel-word density, and a passive-voice detector — all review-only suggestions.
+ - **86 bundled language dictionaries** (14 million+ Hunspell entries): Afrikaans, Aragonese, Arabic, Assamese, Belarusian, Bulgarian, Bangla, Tibetan, Breton, Bosnian, Catalan, Catalan (Valencia), Kurdish (Sorani), Czech, Welsh, Danish, German, Greek, Greek (Polytonic), Esperanto, Spanish, Estonian, Basque, Persian, Faroese, French, Friulian, West Frisian, Irish, Scottish Gaelic, Galician, Gujarati, Guarani, Hebrew, Hindi, Croatian, Hungarian, Armenian, Western Armenian, Interlingua, Indonesian, Interlingue, Icelandic, Interslavic, Italian, Georgian, Kurdish (Kurmanji), Kannada, Korean, Latin, Luxembourgish, Ligurian, Lithuanian, Latgalian, Latvian, Macedonian, Mongolian, Marathi, Norwegian Bokmål, Low German, Nepali, Dutch, Norwegian Nynorsk, Occitan, Odia, Punjabi, Polish, Portuguese, Romanian, Russian, Russian (Petrine orthography), Sanskrit, Sinhala, Slovak, Slovenian, Albanian, Serbian, Serbian (Latin script), Swedish, Swahili, Tamil, Telugu, Turkmen, Turkish, Ukrainian, and Vietnamese — gzipped, loaded on demand for the document's language, with morphology-aware, frequency-ranked suggestions. Most ship as locked `dictionary-*` npm packages; 23 languages without npm packages are vendored from the LibreOffice/dictionaries repository and fetched by the build. American and British English remain fully bundled; Indian English uses the British dictionary and spelling policy.
+diff --git a/src/core/checker.js b/src/core/checker.js
+index 1b92a6e..ffe1ef0 100644
+--- a/src/core/checker.js
++++ b/src/core/checker.js
+@@ -7,6 +7,7 @@
+ //  - OCR restoration heuristics
+ import nspell from 'nspell';
+ import {LazyHunspell} from './lazy-hunspell.js';
++import {Morphology} from './morphology.js';
+ import {REGEX_RULES, LITERAL_RULES, LITERAL_TRIGGER_INDEX, matchCase, replacementFor, ruleCounts, CONFUSION_SETS} from './rules/index.js';
+ import {compilePackRules} from './resources.js';
+ import {matchLiteralRules} from './rules/literal.js';
+@@ -53,6 +54,12 @@ export class ProofEngine {
+   constructor(dictionary, corrections = {}, options = {}) {
+     this.spell = dictionary ? (typeof dictionary.correct === 'function' && typeof dictionary.suggest === 'function' ? dictionary : nspell(dictionary)) : null;
+     for (const word of EXTRA_WORDS) this.spell?.add(word);
++    // Generative morphology (see ./morphology.js) always runs as the last
++    // resort in correct(): dictionaries with rich affix tables accept their
++    // inflections themselves, and the generative layer only sees the words
++    // every dictionary rejected.
++    this.morphology = Morphology.forLanguage('en-US');
++    this.morphCache = new Map();
+     this.corrections = corrections;
+     this.cache = new Map();
+     this.extraSpells = [];
+@@ -73,6 +80,8 @@ export class ProofEngine {
+   configure({packs = [], personal = [], language = 'en-US'} = {}) {
+     this.language = language;
+     this.english = language.split('-')[0] === 'en';
++    this.morphology = Morphology.forLanguage(language);
++    this.morphCache.clear();
+     this.british = /^en-(GB|IN|AU|NZ|IE)/i.test(language);
+     this.personal = new Set(personal.map(x => x.toLocaleLowerCase(language)));
+     this.wordlist = new Set();
+@@ -85,6 +94,30 @@ export class ProofEngine {
+     this.cache.clear();
+   }
+ 
++  // A word counts as known when it or any of its inflected forms resolves
++  // to a dictionary, personal-list, or domain entry.
++  knownRoot(stem) {
++    if (this.personal?.has(stem) || this.wordlist?.has(stem) || this.domainWords?.has(stem)) return true;
++    if (this.extraSpells.some(s => s.correct(stem))) return true;
++    return !!(this.spell?.correct(stem));
++  }
++
++  // Generative fallback: accept an unknown word when it decomposes into a
++  // known root plus a plausible inflection for the document language
++  // (inflections, declensions, conjugations are not spelling errors).
++  acceptsInflection(word) {
++    if (!this.morphology) return false;
++    const cached = this.morphCache.get(word);
++    if (cached !== undefined) return cached;
++    let ok = false;
++    if (word.length >= 2 && word.length <= 48 && !/\p{N}/u.test(word)) {
++      ok = this.morphology.lemmatize(word, stem => this.knownRoot(stem));
++    }
++    if (this.morphCache.size >= 4000) this.morphCache.clear();
++    this.morphCache.set(word, ok);
++    return ok;
++  }
++
+   correct(word) {
+     const lower = word.toLocaleLowerCase(this.language);
+     if (this.personal?.has(lower) || this.wordlist?.has(lower)) return true;
+@@ -92,7 +125,8 @@ export class ProofEngine {
+     if (this.extraSpells.some(s => s.correct(word))) return true;
+     // The primary dictionary always matches the document language (English
+     // variants and every bundled language alike), so consult it directly.
+-    return !!(this.spell?.correct(word) || this.spell?.correct(lower));
++    if (this.spell?.correct(word) || this.spell?.correct(lower)) return true;
++    return this.acceptsInflection(lower);
+   }
+ 
+   frequencyRank(word) {
+@@ -151,6 +185,11 @@ export class ProofEngine {
+             .map(s => ({word: s.word, score: s.score}))
+         : candidates.slice(0, 5).map((w, i) => ({word: w, score: .9 - i * .06}));
+     }
++    // Last resort for unknown words in any language: offer the main root
++    // form of a plausible inflection ("walkss" -> "walk", "Hauss" -> "haus").
++    if (!scored.length && this.morphology) {
++      for (const root of this.morphology.roots(lower, stem => this.knownRoot(stem))) scored.push({word: root, score: .5});
++    }
+     const result = [...new Map(scored.map(s => [s.word.toLowerCase(), s])).values()]
+       .sort((a, b) => b.score - a.score).slice(0, 5)
+       .map(s => ({word: matchCase(s.word, word), score: s.score}));
+diff --git a/src/core/data/inflections.js b/src/core/data/inflections.js
+new file mode 100644
+index 0000000..8dd9016
+--- /dev/null
++++ b/src/core/data/inflections.js
+@@ -0,0 +1,466 @@
++// Generative morphology tables: one spec per language (or per script), used
++// by src/core/morphology.js to recognize inflected, declined, and conjugated
++// forms of dictionary words that the bundled Hunspell affix data does not
++// cover (wordlist-only dictionaries, sparse affix files, user packs).
++//
++// A spec understands three operations, tried on any word the dictionary
++// rejected:
++//  - suffixes: strip the ending ("evlerde" -> "evler" -> "ev"),
++//  - swaps:    replace the ending ("книги" -> "книга", "studies" -> "study"),
++//  - prefixes: strip a clitic ("الكتاب" -> "كتاب", "والكتابات" -> ... -> "كتاب").
++//
++// verbSuffixes are past/gerund-style endings that may attach through
++// consonant doubling or silent-e loss ("walking" = walk + ing, "loved" =
++// love + d). With cvcGate, a stripped stem that ends vowel+consonant only
++// verifies through its silent-e form ("runing" -> "rune" fails, so the typo
++// stays flagged, while "loved" -> "love" passes).
++//
++// guards are function words that must never act as generative stems, so
++// "thes", "les", "und" stay spelling errors.
++//
++// Every bundled language resolves to a curated spec, an alias onto a close
++// relative, or a script fallback (_latin, _cyrillic, _arabic, _devanagari,
++// _hangul, _greek, _hebrew, _georgian), so the mechanism covers all of them.
++
++const cyrillicGuards = ['и', 'в', 'не', 'на', 'что', 'это', 'как', 'а', 'но', 'по', 'из', 'у', 'за', 'то', 'же', 'бы', 'от', 'до', 'для', 'при', 'над', 'под', 'или', 'если', 'уже', 'еще', 'ещё', 'там', 'тут', 'очень'];
++
++// Shared Cyrillic endings (nouns/adjectives + common verb forms). Velar
++// alternations (книга -> книги) go through swaps.
++const CYRILLIC_SPEC = {
++  minStem: 3,
++  maxDepth: 2,
++  suffixes: ['ами', 'ями', 'ого', 'его', 'ому', 'ему', 'ыми', 'ими', 'ах', 'ях', 'ам', 'ям', 'ов', 'ев', 'ой', 'ей', 'ою', 'ею', 'ом', 'ем', 'ым', 'им', 'ешь', 'ете', 'ут', 'ют', 'ат', 'ят', 'ла', 'ло', 'ли', 'ть', 'ся', 'сь', 'ый', 'ий', 'ая', 'яя', 'ое', 'ее', 'ые', 'ие', 'а', 'я', 'ы', 'и', 'у', 'ю', 'е', 'о', 'ё', 'й', 'ь'],
++  swaps: [['ги', 'га'], ['ки', 'ка'], ['хи', 'ха'], ['и', 'а'], ['ы', 'а'], ['у', 'а'], ['ю', 'я']],
++  guards: cyrillicGuards,
++};
++
++const ENGLISH_SPEC = {
++  minStem: 3,
++  maxDepth: 1,
++  cvcGate: true,
++  strictEs: true,
++  suffixes: ["'s", "s'", 'es', 's'],
++  verbs: ['ing', 'ed'],
++  swaps: [['ied', 'y'], ['ies', 'y'], ['ves', 'fe'], ['ves', 'f']],
++  guards: ['the', 'a', 'an', 'and', 'or', 'but', 'nor', 'so', 'yet', 'if', 'then', 'than', 'that', 'this', 'these', 'those', 'there', 'here', 'when', 'where', 'why', 'how', 'all', 'any', 'both', 'each', 'few', 'more', 'most', 'some', 'such', 'only', 'own', 'same', 'too', 'very', 'just', 'now', 'out', 'up', 'down', 'off', 'over', 'under', 'again', 'about', 'against', 'between', 'into', 'through', 'during', 'before', 'after', 'above', 'below', 'of', 'to', 'in', 'on', 'at', 'by', 'for', 'with', 'from', 'as', 'is', 'are', 'was', 'were', 'be', 'been', 'being', 'am', 'do', 'does', 'did', 'have', 'has', 'had', 'will', 'would', 'shall', 'should', 'can', 'could', 'may', 'might', 'must', 'not', 'no', 'i', 'you', 'he', 'she', 'it', 'we', 'they', 'them', 'his', 'her', 'its', 'our', 'your', 'my', 'me', 'us', 'him', 'what', 'which', 'who', 'whom', 'whose', 'one', 'once', 'also', 'because', 'while', 'until', 'upon', 'among', 'along', 'across', 'behind', 'beyond', 'without', 'within', 'per', 'via'],
++};
++
++const LATIN_SPEC = {
++  minStem: 3,
++  maxDepth: 1,
++  cvcGate: true,
++  strictEs: true,
++  suffixes: ['es', 's'],
++  verbs: ['ing', 'ed'],
++  swaps: [['ies', 'y']],
++  guards: ['the', 'and', 'of', 'to', 'in', 'is', 'it', 'that', 'for', 'on', 'with', 'as', 'was', 'be', 'are', 'this', 'at', 'by', 'an', 'or'],
++};
++
++const ARABIC_SPEC = {
++  minStem: 2,
++  maxDepth: 3,
++  prefixes: ['وال', 'فال', 'كال', 'بال', 'لل', 'ال', 'و', 'ف', 'ب', 'ل', 'ك'],
++  suffixes: ['اتهم', 'اتها', 'اتنا', 'اتكم', 'اتكن', 'ينها', 'ينهم', 'ونها', 'ونهم', 'هما', 'كما', 'ية', 'ات', 'ون', 'ين', 'ان', 'ها', 'هم', 'هن', 'كم', 'كن', 'نا', 'يه', 'ي', 'ك', 'ة', 'ه'],
++  guards: ['في', 'من', 'على', 'إلى', 'عن', 'أن', 'إن', 'هذا', 'هذه', 'ذلك', 'التي', 'الذي', 'ما', 'لا', 'قد', 'كل', 'بعد', 'قبل', 'هو', 'هي', 'هم', 'أو', 'ثم', 'لكن', 'حتى', 'إذا', 'كما', 'مع', 'كان', 'كانت'],
++};
++
++const DEVANAGARI_SPEC = {
++  minStem: 2,
++  maxDepth: 2,
++  suffixes: ['रहा', 'रही', 'रहे', 'गया', 'गयी', 'गये', 'गा', 'गे', 'गी', 'ता', 'ते', 'ती', 'ना', 'ने', 'नी', 'या', 'ए', 'ओ', 'इयाँ', 'इयों', 'कर', 'त'],
++  guards: ['और', 'का', 'की', 'के', 'को', 'में', 'से', 'पर', 'यह', 'वह', 'है', 'हैं', 'था', 'थी', 'नहीं', 'भी', 'कि', 'जो', 'तो', 'ही', 'एक', 'इस', 'उस', 'मैं', 'हम', 'आप', 'क्या'],
++};
++
++const HANGUL_SPEC = {
++  minStem: 2,
++  maxDepth: 2,
++  suffixes: ['에서는', '으로는', '으로써', '에게서', '에서', '에게', '한테', '까지', '부터', '처럼', '마다', '이라', '라는', '으로', '습니다', '습니까', '합니다', '주세요', '었다', '였다', '는다', '한다', '하고', '하면', '하지', '이다', '은', '는', '이', '가', '을', '를', '에', '와', '과', '의', '도', '만', '로'],
++  guards: ['그리고', '하지만', '그래서', '그런데', '그러나', '이것', '그것', '저것', '무엇', '누구', '우리', '나', '너', '저'],
++};
++
++const GREEK_SPEC = {
++  minStem: 2,
++  maxDepth: 2,
++  suffixes: ['ουμε', 'ομαστε', 'εστε', 'ονται', 'εσαι', 'ομαι', 'εται', 'εις', 'ους', 'ων', 'ες', 'ας', 'ης', 'οι', 'ου', 'εις', 'ει', 'ηκα', 'ηκες', 'ηκε', 'ηκαν', 'α', 'η', 'ο', 'ε', 'ν', 'ς', 'ι'],
++  swaps: [['ία', 'ίο'], ['ιά', 'ιό'], ['ές', 'ός'], ['ές', 'ής'], ['ά', 'ό']],
++  guards: ['και', 'να', 'το', 'της', 'των', 'με', 'σε', 'για', 'από', 'που', 'είναι', 'δεν', 'ότι', 'αλλά', 'ως', 'ο', 'η', 'οι', 'τα', 'ενα', 'ένα', 'στη', 'στο'],
++};
++
++const HEBREW_SPEC = {
++  minStem: 2,
++  maxDepth: 2,
++  prefixes: ['ש', 'ה', 'ב', 'ל', 'ו', 'מ', 'כ'],
++  suffixes: ['יהם', 'יהן', 'יכם', 'יכן', 'ינו', 'יך', 'יה', 'ים', 'ות', 'נו', 'כם', 'כן', 'הם', 'הן', 'ך', 'ו', 'י', 'ה', 'ת'],
++  guards: ['אני', 'אתה', 'הוא', 'היא', 'אנחנו', 'אתם', 'של', 'על', 'עם', 'יש', 'לא', 'כן', 'זה', 'זו', 'אל', 'עד', 'אם', 'גם'],
++};
++
++const GEORGIAN_SPEC = {
++  minStem: 2,
++  maxDepth: 2,
++  suffixes: ['ების', 'ებმა', 'ებში', 'ებს', 'ები', 'იანი', 'ური', 'ელი', 'თან', 'ის', 'მა', 'ში', 'ს', 'ო', 'და'],
++  guards: ['და', 'რომ', 'ეს', 'ის', 'არის', 'არ', 'კი', 'თუ', 'რა', 'ვინ', 'სად', 'როდის', 'ჩვენ', 'თქვენ', 'ისინი'],
++};
++
++export const INFLECTION_SPECS = {
++  en: ENGLISH_SPEC,
++
++  // Romance
++  es: {
++    minStem: 3,
++    maxDepth: 2,
++    suffixes: ['ando', 'iendo', 'amos', 'áis', 'aban', 'aron', 'aste', 'ían', 'ado', 'ada', 'ados', 'adas', 'aba', 'é', 'ó', 'as', 'os', 'es', 'an', 'en', 's'],
++    swaps: [['amos', 'ar'], ['ando', 'ar'], ['ado', 'ar'], ['aron', 'ar'], ['aban', 'ar'], ['aste', 'ar'], ['é', 'ar'], ['ó', 'ar'], ['emos', 'er'], ['iendo', 'er'], ['ido', 'er'], ['imos', 'ir'], ['iendo', 'ir'], ['ido', 'ir']],
++    guards: ['el', 'la', 'los', 'las', 'un', 'una', 'unos', 'unas', 'y', 'o', 'u', 'es', 'son', 'de', 'del', 'al', 'en', 'con', 'por', 'para', 'que', 'se', 'su', 'sus', 'mi', 'mis', 'tu', 'tus', 'lo', 'le', 'les', 'este', 'esta', 'estos', 'estas', 'ese', 'esa', 'como', 'pero', 'mas', 'más', 'ya', 'ni', 'si', 'no', 'ha', 'he', 'han', 'hay', 'fue', 'era', 'dos', 'tres'],
++  },
++  pt: {
++    minStem: 3,
++    maxDepth: 2,
++    suffixes: ['ando', 'endo', 'indo', 'amos', 'avam', 'aram', 'aria', 'ado', 'ada', 'ados', 'adas', 'ões', 'ão', 'em', 'os', 'as', 'es', 's'],
++    swaps: [['ões', 'ão'], ['amos', 'ar'], ['ando', 'ar'], ['ado', 'ar'], ['aram', 'ar'], ['amos', 'ar'], ['emos', 'er'], ['endo', 'er'], ['ido', 'er'], ['imos', 'ir'], ['indo', 'ir'], ['ido', 'ir']],
++    guards: ['o', 'a', 'os', 'as', 'um', 'uma', 'uns', 'umas', 'de', 'do', 'da', 'dos', 'das', 'em', 'no', 'na', 'nos', 'nas', 'por', 'pelo', 'pela', 'com', 'para', 'que', 'se', 'não', 'mais', 'como', 'mas', 'também', 'e', 'ou', 'é', 'são', 'foi', 'era', 'eu', 'tu', 'ele', 'ela', 'nós', 'eles', 'muito', 'já', 'só', 'tem'],
++  },
++  fr: {
++    minStem: 3,
++    maxDepth: 2,
++    strictEs: true,
++    suffixes: ['aient', 'ions', 'iez', 'ent', 'ant', 'ons', 'ez', 'ais', 'ait', 'ée', 'ées', 'és', 'é', 'es', 's'],
++    swaps: [['aient', 'er'], ['ions', 'er'], ['iez', 'er'], ['ons', 'er'], ['ez', 'er'], ['ent', 'er'], ['ant', 'er'], ['ais', 'er'], ['ait', 'er'], ['ée', 'er'], ['ées', 'er'], ['és', 'er'], ['é', 'er'], ['is', 'ir'], ['it', 'ir']],
++    guards: ['le', 'la', 'les', 'un', 'une', 'des', 'et', 'est', 'sont', 'de', 'du', 'au', 'aux', 'ce', 'cet', 'cette', 'ces', 'mon', 'ma', 'mes', 'ton', 'ta', 'tes', 'son', 'sa', 'ses', 'notre', 'nos', 'votre', 'vos', 'leur', 'leurs', 'pour', 'par', 'avec', 'dans', 'sur', 'sous', 'que', 'qui', 'quoi', 'dont', 'ne', 'pas', 'plus', 'très', 'bien', 'mais', 'donc', 'car', 'ni', 'je', 'tu', 'il', 'elle', 'nous', 'vous', 'ils', 'elles', 'on', 'en', 'y', 'se', 'ça'],
++  },
++  it: {
++    minStem: 3,
++    maxDepth: 2,
++    strictEs: true,
++    suffixes: ['ando', 'endo', 'iamo', 'avamo', 'evano', 'ono', 'ano', 'ato', 'ata', 'ati', 'ate', 'uto', 'ito', 'ita', 'ava', 'avo', 'ai', 'ò', 'os', 'as', 'es'],
++    swaps: [['iamo', 'are'], ['ando', 'are'], ['ato', 'are'], ['avo', 'are'], ['ano', 'are'], ['ai', 'are'], ['ò', 'are'], ['emo', 'ere'], ['endo', 'ere'], ['uto', 'ere'], ['ono', 'ere'], ['imo', 'ire'], ['endo', 'ire'], ['ito', 'ire'], ['ono', 'ire']],
++    guards: ['il', 'lo', 'la', 'gli', 'le', 'un', 'uno', 'una', 'ed', 'è', 'sono', 'dei', 'della', 'delle', 'degli', 'del', 'al', 'allo', 'alla', 'ai', 'agli', 'alle', 'in', 'con', 'su', 'per', 'tra', 'fra', 'di', 'da', 'che', 'chi', 'non', 'più', 'molto', 'come', 'ma', 'però', 'anche', 'se', 'io', 'tu', 'lui', 'lei', 'noi', 'voi', 'loro', 'mi', 'ti', 'si', 'ci', 'vi', 'questo', 'questa', 'quello', 'quella', 'due', 'tre'],
++  },
++  ca: {
++    minStem: 3,
++    maxDepth: 2,
++    suffixes: ['ant', 'ent', 'ada', 'ades', 'ats', 'ava', 'aven', 'em', 'eu', 'en', 'í', 'à', 'os', 'es', 's'],
++    swaps: [['em', 'ar'], ['ant', 'ar'], ['at', 'ar'], ['ada', 'ar'], ['í', 'ir'], ['ent', 'er']],
++    guards: ['el', 'la', 'els', 'les', 'un', 'una', 'uns', 'unes', 'i', 'o', 'és', 'són', 'de', 'del', 'al', 'en', 'amb', 'per', 'per a', 'que', 'es', 'seu', 'seva', 'aquest', 'aquesta', 'com', 'però', 'més', 'ja', 'ni', 'si', 'no', 'ha', 'he', 'han', 'hi'],
++  },
++  ro: {
++    minStem: 3,
++    maxDepth: 2,
++    suffixes: ['urilor', 'elor', 'ului', 'uri', 'ile', 'le', 'ul', 'ă'],
++    guards: ['și', 'este', 'sunt', 'un', 'una', 'unei', 'ale', 'al', 'ai', 'la', 'în', 'din', 'cu', 'pe', 'pentru', 'care', 'ce', 'nu', 'mai', 'dar', 'sau', 'ca', 'de', 'doar', 'foarte'],
++  },
++  la: {
++    minStem: 3,
++    maxDepth: 2,
++    suffixes: ['orum', 'arum', 'ibus', 'ium', 'uum', 'ae', 'am', 'um', 'em', 'us', 'is', 'es', 'os', 'as'],
++    guards: ['et', 'est', 'non', 'in', 'ab', 'ad', 'cum', 'si', 'sed', 'ut', 'qui', 'quae', 'quod', 'ne', 'ex', 'de', 'per', 'atque'],
++  },
++  eo: {
++    minStem: 3,
++    maxDepth: 2,
++    suffixes: ['ojn', 'ajn', 'oj', 'aj', 'on', 'as', 'is', 'os', 'us', 'n', 'j', 'o', 'a', 'e', 'i', 'u'],
++    guards: ['kaj', 'estas', 'ne', 'la', 'de', 'en', 'al', 'kun', 'por', 'per', 'sed', 'aŭ', 'ke', 'kiu', 'kio', 'pli', 'tre', 'jen'],
++  },
++
++  // Germanic
++  de: {
++    minStem: 3,
++    maxDepth: 3,
++    unUmlaut: true,
++    suffixes: ['es', 'en', 'er', 'em', 'n', 'e', 's'],
++    guards: ['der', 'die', 'das', 'den', 'dem', 'des', 'ein', 'eine', 'einen', 'einem', 'einer', 'eines', 'und', 'oder', 'aber', 'ist', 'sind', 'war', 'waren', 'sein', 'haben', 'hat', 'hatte', 'nicht', 'kein', 'keine', 'ich', 'du', 'er', 'sie', 'es', 'wir', 'ihr', 'mich', 'mir', 'dir', 'uns', 'euch', 'man', 'zum', 'zur', 'im', 'in', 'an', 'auf', 'mit', 'von', 'zu', 'bei', 'nach', 'aus', 'für', 'um', 'durch', 'gegen', 'ohne', 'über', 'unter', 'vor', 'hinter', 'wenn', 'weil', 'dass', 'wie', 'was', 'wer', 'wo', 'da', 'dann', 'auch', 'noch', 'schon', 'nur', 'sehr', 'mehr', 'als', 'so'],
++  },
++  nl: {
++    minStem: 3,
++    maxDepth: 2,
++    finalDevoice: true,
++    suffixes: ['jes', 'tje', 'en', 'e', 's'],
++    guards: ['de', 'het', 'een', 'en', 'of', 'is', 'zijn', 'was', 'waren', 'niet', 'geen', 'ik', 'je', 'hij', 'zij', 'we', 'ze', 'me', 'mij', 'hem', 'haar', 'ons', 'jullie', 'deze', 'dit', 'dat', 'die', 'wat', 'wie', 'waar', 'hoe', 'met', 'van', 'in', 'op', 'voor', 'naar', 'uit', 'bij', 'om', 'door', 'over', 'onder', 'maar', 'als', 'dan', 'nog', 'ook', 'al', 'heel', 'meer', 'dan'],
++  },
++  sv: {
++    minStem: 3,
++    maxDepth: 2,
++    suffixes: ['arnas', 'ornas', 'ernas', 'arna', 'orna', 'erna', 'arn', 'nas', 'ens', 'ets', 'ar', 'or', 'er', 'en', 'et', 'na', 'ne', 'a', 'e', 'n', 's'],
++    guards: ['och', 'att', 'det', 'är', 'som', 'en', 'ett', 'på', 'för', 'med', 'av', 'inte', 'om', 'till', 'från', 'men', 'eller', 'jag', 'du', 'han', 'hon', 'vi', 'ni', 'de', 'den', 'denna', 'detta', 'dessa', 'vad', 'vem', 'var', 'hur', 'kan', 'varit', 'har', 'inte', 'mycket', 'också', 'bara'],
++  },
++  da: {
++    minStem: 3,
++    maxDepth: 2,
++    suffixes: ['erne', 'ernes', 'ene', 'enes', 'er', 'en', 'et', 'e', 's', 'ne'],
++    guards: ['og', 'at', 'det', 'er', 'som', 'en', 'et', 'på', 'for', 'med', 'af', 'ikke', 'om', 'til', 'fra', 'men', 'eller', 'jeg', 'du', 'han', 'hun', 'vi', 'de', 'den', 'denne', 'dette', 'disse', 'hvad', 'hvem', 'hvordan', 'kan', 'har', 'været', 'meget', 'også', 'kun'],
++  },
++  is: {
++    minStem: 3,
++    maxDepth: 2,
++    unUmlaut: true,
++    suffixes: ['arnir', 'urnar', 'irnar', 'inum', 'unum', 'inn', 'ina', 'num', 'um', 'ar', 'ir', 'ur', 'i', 'a', 's', 'u'],
++    guards: ['og', 'að', 'sem', 'er', 'um', 'til', 'frá', 'með', 'af', 'ekki', 'en', 'eða', 'ég', 'þú', 'hann', 'hún', 'við', 'þeir', 'þetta', 'þessi', 'hvað', 'hvernig', 'mikid', 'ein'],
++  },
++
++  // Slavic (Cyrillic)
++  ru: CYRILLIC_SPEC,
++  be: {
++    minStem: 3,
++    maxDepth: 2,
++    suffixes: ['ами', 'ях', 'ах', 'ой', 'эй', 'ому', 'ему', 'ых', 'іх', 'ові', 'ів', 'ам', 'ям', 'ла', 'ло', 'лі', 'ць', 'ся', 'а', 'я', 'ы', 'і', 'у', 'ю', 'е', 'ё', 'о'],
++    swaps: [['гі', 'га'], ['кі', 'ка'], ['хі', 'ха'], ['і', 'а'], ['ы', 'а']],
++    guards: cyrillicGuards,
++  },
++  uk: {
++    minStem: 3,
++    maxDepth: 2,
++    suffixes: ['ами', 'ями', 'ах', 'ях', 'ові', 'ови', 'ої', 'ій', 'ими', 'им', 'их', 'ів', 'ам', 'ям', 'ла', 'ло', 'ли', 'ти', 'ся', 'а', 'я', 'и', 'і', 'у', 'ю', 'е', 'о'],
++    swaps: [['ки', 'ка'], ['хи', 'ха'], ['і', 'а'], ['и', 'а']],
++    guards: cyrillicGuards,
++  },
++  bg: {
++    minStem: 3,
++    maxDepth: 2,
++    suffixes: ['ата', 'ята', 'ето', 'ете', 'овце', 'ът', 'ят', 'та', 'то', 'те', 'ов', 'ев', 'а', 'я', 'и', 'у', 'ю', 'е', 'о'],
++    swaps: [['хи', 'ха'], ['ки', 'ка'], ['и', 'а'], ['е', 'я']],
++    guards: cyrillicGuards,
++  },
++  mk: {
++    minStem: 3,
++    maxDepth: 2,
++    suffixes: ['овите', 'ите', 'ови', 'ја', 'от', 'та', 'то', 'те', 'а', 'и', 'е', 'у'],
++    swaps: [['и', 'а']],
++    guards: cyrillicGuards,
++  },
++  sr: {
++    // Both scripts share vowel endings; script-specific clusters listed too.
++    minStem: 3,
++    maxDepth: 2,
++    suffixes: ['има', 'ама', 'ога', 'оја', 'их', 'ом', 'има', 'ама', 'има', 'ama', 'ima', 'ama', 'og', 'oj', 'eg', 'ih', 'om', 'a', 'е', 'и', 'о', 'у', 'e', 'i', 'o', 'u'],
++    swaps: [['и', 'а'], ['ки', 'ка'], ['ги', 'га'], ['i', 'a']],
++    guards: cyrillicGuards,
++  },
++
++  // Slavic (Latin) + Baltic
++  pl: {
++    minStem: 3,
++    maxDepth: 2,
++    suffixes: ['owie', 'ami', 'ach', 'ów', 'om', 'iem', 'ie', 'ę', 'y', 'i', 'a', 'u', 'e', 'o', 'ą'],
++    swaps: [['y', 'a'], ['i', 'a']],
++    guards: ['i', 'w', 'na', 'z', 'ze', 'że', 'do', 'od', 'za', 'po', 'przy', 'dla', 'bez', 'pod', 'nad', 'przed', 'między', 'przez', 'o', 'nie', 'jest', 'są', 'to', 'ten', 'ta', 'te', 'ci', 'jak', 'co', 'kto', 'gdzie', 'kiedy', 'ale', 'lub', 'czy', 'tak', 'już', 'jeszcze', 'bardzo', 'tylko', 'może', 'się', 'mi', 'go', 'ją', 'nas', 'was', 'ich'],
++  },
++  cs: {
++    minStem: 3,
++    maxDepth: 2,
++    suffixes: ['ách', 'ých', 'ým', 'ami', 'ům', 'ou', 'em', 'ovi', 'ě', 'é', 'ý', 'í', 'u', 'y', 'i', 'a', 'e', 'o'],
++    swaps: [['i', 'a'], ['y', 'a']],
++    guards: ['a', 'ale', 'nebo', 'je', 'jsou', 'v', 'na', 's', 'se', 'z', 'do', 'od', 'za', 'po', 'při', 'pro', 'bez', 'pod', 'nad', 'před', 'mezi', 'přes', 'o', 'k', 'ke', 'ku', 'to', 'ten', 'ta', 'ty', 'tyto', 'jak', 'co', 'kdo', 'kde', 'kdy', 'tak', 'ještě', 'velmi', 'jen', 'možná', 'se'],
++  },
++  hr: {
++    minStem: 3,
++    maxDepth: 2,
++    suffixes: ['ovima', 'ijevima', 'ama', 'ima', 'og', 'eg', 'oj', 'om', 'im', 'ih', 'a', 'e', 'i', 'o', 'u'],
++    swaps: [['i', 'a']],
++    guards: ['i', 'u', 'na', 'za', 'od', 'do', 'po', 'prije', 'nakon', 'kod', 'bez', 'pod', 'nad', 'pred', 'među', 'kroz', 'o', 'k', 'ka', 's', 'sa', 'nije', 'je', 'su', 'to', 'taj', 'ta', 'to', 'ti', 'kako', 'što', 'tko', 'gdje', 'kada', 'ali', 'ili', 'još', 'vrlo', 'samo', 'se'],
++  },
++  sl: {
++    minStem: 3,
++    maxDepth: 2,
++    suffixes: ['oma', 'ih', 'ov', 'em', 'ega', 'a', 'e', 'i', 'o', 'u', 'm'],
++    guards: ['in', 'ali', 'je', 'so', 'v', 'na', 'z', 's', 'za', 'od', 'do', 'po', 'brez', 'pod', 'nad', 'pred', 'med', 'skozi', 'o', 'k', 'h', 'ta', 'to', 'ta', 'kako', 'kaj', 'kdo', 'kje', 'kdaj', 'ampak', 'še', 'zelo', 'samo', 'se'],
++  },
++  lt: {
++    minStem: 3,
++    maxDepth: 2,
++    suffixes: ['iais', 'iems', 'iams', 'ose', 'ęs', 'ąs', 'ų', 'ą', 'ai', 'ui', 'ę', 'os', 'oms', 'is', 'ys', 'io', 'iui', 'ės', 'ėms', 'ėse', 'ė', 'us', 'em', 'es', 'i', 'a', 'e', 'o', 'u'],
++    guards: ['ir', 'arba', 'yra', 'buvo', 'ne', 'į', 'prie', 'iš', 'nuo', 'iki', 'po', 'prieš', 'be', 'po', 'per', 'apie', 'su', 'su', 'tai', 'tas', 'ta', 'tie', 'kaip', 'kas', 'kur', 'kada', 'bet', 'dar', 'labai', 'tik', 'gali'],
++  },
++  lv: {
++    minStem: 3,
++    maxDepth: 2,
++    suffixes: ['ajiem', 'ajām', 'iem', 'ām', 'os', 'ās', 'us', 'ai', 'ei', 'am', 'u', 'a', 'i', 'e', 's'],
++    swaps: [['i', 'a']],
++    guards: ['un', 'vai', 'ir', 'bija', 'ne', 'iekš', 'no', 'līdz', 'uz', 'par', 'bez', 'zem', 'virs', 'starppreikš', 'caur', 'ap', 'ar', 'tas', 'tā', 'šis', 'šī', 'kā', 'kas', 'kur', 'kad', 'bet', 'vēl', 'ļoti', 'tikai', 'var'],
++  },
++
++  // Uralic
++  hu: {
++    minStem: 2,
++    maxDepth: 3,
++    suffixes: ['aitok', 'aitok', 'aink', 'eink', 'akat', 'eket', 'okban', 'ekben', 'ökben', 'unk', 'ünk', 'nak', 'nek', 'nál', 'nél', 'tól', 'től', 'val', 'vel', 'ok', 'ek', 'ök', 'ak', 'ot', 'et', 'öt', 'at', 'on', 'en', 'ön', 'an', 'ban', 'ben', 'ba', 'be', 'ra', 're', 'hoz', 'hez', 'höz', 'ul', 'ül', 'vá', 'vé', 'ai', 'ei', 'k', 't', 'j', 'i', 'a', 'e', 'o'],
++    guards: ['és', 'vagy', 'de', 'az', 'ez', 'egy', 'nem', 'van', 'vannak', 'volt', 'lett', 'hogy', 'mint', 'mikor', 'hol', 'miért', 'ki', 'mi', 'nagyon', 'még', 'is', 'csak', 'már', 'minden', 'sok'],
++  },
++  et: {
++    minStem: 3,
++    maxDepth: 2,
++    suffixes: ['tesse', 'tes', 'sse', 'dega', 'st', 'le', 'lt', 'ga', 'de', 'd', 't', 'n'],
++    guards: ['ja', 'või', 'on', 'olis', 'ei', 'et', 'mis', 'kes', 'kus', 'millal', 'kuidas', 'aga', 'ka', 'veel', 'väga', 'ainult', 'juba', 'see', 'see', 'tema', 'meie', 'teie', 'nemad'],
++  },
++
++  // Turkic
++  tr: {
++    minStem: 2,
++    maxDepth: 4,
++    suffixes: ['larında', 'lerinde', 'larından', 'lerinden', 'lardan', 'lerden', 'larını', 'lerini', 'ların', 'lerin', 'ımıza', 'imize', 'ımızi', 'ınızın', 'inizin', 'ımız', 'imiz', 'umuz', 'ümüz', 'ınız', 'iniz', 'ınız', 'ınız', 'larının', 'lerinin', 'larda', 'lerde', 'lardan', 'lerden', 'ları', 'leri', 'ında', 'inde', 'ında', 'ından', 'inden', 'sında', 'sinde', 'ından', 'inden', 'ım', 'im', 'um', 'üm', 'ım', 'ın', 'in', 'un', 'ün', 'sı', 'si', 'su', 'sü', 'da', 'de', 'ta', 'te', 'dan', 'den', 'tan', 'ten', 'ki', 'lar', 'ler', 'a', 'e', 'ı', 'i', 'u', 'ü'],
++    guards: ['ve', 'bir', 'bu', 'şu', 'o', 'ile', 'için', 'gibi', 'ama', 'fakat', 'çok', 'daha', 'en', 'de', 'da', 'mi', 'mı', 'ise', 'yani', 'çünkü', 'göre', 'kadar', 'sonra', 'önce', 'var', 'yok', 'değil', 'ben', 'sen', 'biz', 'siz', 'onlar', 'benim', 'senin', 'bizim', 'sizin', 'onun'],
++  },
++  mn: {
++    minStem: 3,
++    maxDepth: 2,
++    suffixes: ['уудын', 'үүдийн', 'уудаас', 'үүдээс', 'ууд', 'үүд', 'ийн', 'ын', 'ийг', 'ыг', 'аас', 'ээс', 'оос', 'өөс', 'аар', 'ээр', 'д', 'т', 'ы', 'и'],
++    guards: ['ба', 'бол', 'инь', 'юу', 'хэн', 'хаана', 'хэзээ', 'яагаад', 'болон', 'гэж', 'маш', 'зөвхөн', 'бид', 'та', 'тэд', 'энэ', 'тэр'],
++  },
++
++  // Semitic / Iranian
++  ar: ARABIC_SPEC,
++  fa: {
++    minStem: 2,
++    maxDepth: 2,
++    suffixes: ['ترین', 'هايي', 'هاي', 'های', 'هایی', 'تر', 'ها', 'ام', 'ات', 'اش', 'يم', 'ید', 'ند', 'ش', 'ی'],
++    guards: ['در', 'به', 'از', 'که', 'این', 'آن', 'است', 'برای', 'با', 'هم', 'نیز', 'یا', 'را', 'می', 'بر', 'تا', 'اما', 'اگر', 'چون', 'هر', 'چه', 'خود', 'او', 'باید', 'دارد', 'بود', 'شد'],
++  },
++  he: HEBREW_SPEC,
++
++  // Indic
++  hi: DEVANAGARI_SPEC,
++  mr: {
++    minStem: 2,
++    maxDepth: 2,
++    suffixes: ['त्या', 'मध्ये', 'ला', 'चा', 'ची', 'चे', 'ने', 'शी', 'ता', 'ते', 'ती', 'ना', 'ने', 'त', 'या'],
++    guards: ['आणि', 'का', 'की', 'के', 'को', 'मध्ये', 'से', 'पर', 'हा', 'ही', 'हे', 'आहे', 'नाही', 'पण', 'तो', 'ती', 'मी', 'आम्ही', 'तुम्ही', 'काय', 'का'],
++  },
++  ne: {
++    minStem: 2,
++    maxDepth: 2,
++    suffixes: ['लाई', 'बाट', 'ले', 'मा', 'को', 'की', 'का', 'ता', 'ते', 'ना', 'ने'],
++    guards: ['र', 'वा', 'छ', 'थियो', 'होइन', 'को', 'की', 'मा', 'बाट', 'यो', 'त्यो', 'उनी', 'उहाँ', 'हामी', 'तपाईं', 'के', 'किन', 'कहाँ'],
++  },
++  sa: {
++    minStem: 2,
++    maxDepth: 2,
++    suffixes: ['न्ति', 'न्तः', 'न्ती', 'ति', 'ते', 'तः', 'ता', 'ना', 'या', 'म्', 'नि', 'तुम्'],
++    guards: ['च', 'न', 'एव', 'इति', 'वा', 'हि', 'तु', 'यः', 'सः', 'सा', 'तत्', 'इदम्', 'अस्ति', 'सन्ति'],
++  },
++  pa: {
++    minStem: 2,
++    maxDepth: 2,
++    suffixes: ['ਨੂੰ', 'ਤੋਂ', 'ਵਿੱਚ', 'ਨਾਲ', 'ਨੇ', 'ਦਾ', 'ਦੀ', 'ਦੇ', 'ਗਿਆ', 'ਦਿੱਤਾ'],
++    guards: ['ਅਤੇ', 'ਜਾਂ', 'ਹੈ', 'ਹਨ', 'ਸੀ', 'ਨਹੀਂ', 'ਵੀ', 'ਕਿ', 'ਇਹ', 'ਉਹ', 'ਮੈਂ', 'ਅਸੀਂ', 'ਤੁਸੀਂ', 'ਕੀ', 'ਕਿਉਂ', 'ਕਿੱਥੇ'],
++  },
++  gu: {
++    minStem: 2,
++    maxDepth: 2,
++    suffixes: ['નું', 'નો', 'ની', 'ને', 'માં', 'થી', 'એ', 'ઓ', 'તા', 'તી', 'તું'],
++    guards: ['અને', 'છે', 'હતું', 'નથી', 'પણ', 'કે', 'આ', 'એ', 'હું', 'અમે', 'તમે', 'શું', 'કેમ', 'ક્યાં'],
++  },
++  kn: {
++    minStem: 2,
++    maxDepth: 2,
++    suffixes: ['ಗಳನ್ನು', 'ದಲ್ಲಿ', 'ದಿಂದ', 'ಅನ್ನು', 'ಗಳು', 'ಗೆ', 'ಗಳ'],
++    guards: ['ಮತ್ತು', 'ಅಥವಾ', 'ಇದು', 'ಅದು', 'ಇಲ್ಲ', 'ಆದರೆ', 'ನಾನು', 'ನಾವು', 'ನೀವು', 'ಏನು', 'ಯಾಕೆ', 'ಎಲ್ಲಿ'],
++  },
++  ta: {
++    minStem: 2,
++    maxDepth: 2,
++    suffixes: ['களுக்கு', 'களில்', 'களை', 'உடன்', 'க்கு', 'கள்', 'இல்', 'ஆல்', 'ஐ'],
++    guards: ['மற்றும்', 'அல்லது', 'இது', 'அது', 'இல்லை', 'ஆனால்', 'நான்', 'நாம்', 'நீங்கள்', 'என்ன', 'ஏன்', 'எங்கே'],
++  },
++  te: {
++    minStem: 2,
++    maxDepth: 2,
++    suffixes: ['నుండి', 'లను', 'లో', 'కు', 'కి', 'లు', 'ను', 'ని'],
++    guards: ['మరియు', 'లేదా', 'ఇది', 'అది', 'లేదు', 'కానీ', 'నేను', 'మేము', 'మీరు', 'ఏమి', 'ఎందుకు', 'ఎక్కడ'],
++  },
++  bn: {
++    minStem: 2,
++    maxDepth: 2,
++    suffixes: ['দের', 'টি', 'টা', 'ছিল', 'রা', 'তে', 'কে', 'র', 'য়'],
++    guards: ['এবং', 'অথবা', 'এই', 'সেই', 'না', 'কিন্তু', 'আমি', 'আমরা', 'তুমি', 'কী', 'কেন', 'কোথায়', 'হয়'],
++  },
++  or: {
++    minStem: 2,
++    maxDepth: 2,
++    suffixes: ['ମାନଙ୍କ', 'ମାନେ', 'ରେ', 'କୁ', 'ର', 'ଟି'],
++    guards: ['ଏବଂ', 'ବା', 'ଏହା', 'ସେଇ', 'ନାହିଁ', 'କିନ୍ତୁ', 'ମୁଁ', 'ଆମେ', 'ତୁମେ', 'କଣ', 'କାହିଁକି', 'କେଉଁଠି'],
++  },
++
++  // Caucasian / Armenian / Korean / Basque / others
++  ka: GEORGIAN_SPEC,
++  hy: {
++    minStem: 2,
++    maxDepth: 2,
++    suffixes: ['ներում', 'ների', 'ները', 'ներ', 'ում', 'ից', 'ը', 'ն', 'ս', 'դ', 'ի', 'ու', 'եմ', 'ես'],
++    guards: ['և', 'կամ', 'այս', 'այն', 'ոչ', 'բայց', 'ես', 'մենք', 'դուք', 'ինչ', 'ինչու', 'որտեղ', 'է', 'են'],
++  },
++  ko: HANGUL_SPEC,
++  eu: {
++    minStem: 2,
++    maxDepth: 2,
++    suffixes: ['tzeko', 'tzen', 'tako', 'aren', 'tik', 'eko', 'tzat', 'gun', 'ak', 'ek', 'ari', 'en', 'an', 'ra', 'kan', 'n', 'a', 'k', 't'],
++    guards: ['eta', 'edo', 'baina', 'ez', 'da', 'dira', 'zen', 'hau', 'hori', 'ni', 'gu', 'zu', 'zer', 'zergatik', 'non', 'oso', 'bereziki'],
++  },
++
++  // African / Austronesian / other Latin-script languages
++  sw: {
++    minStem: 3,
++    maxDepth: 2,
++    suffixes: ['eni', 'wa', 'ni', 'ku'],
++    guards: ['na', 'ya', 'wa', 'kwa', 'ni', 'hii', 'ile', 'hapana', 'lakini', 'mimi', 'sisi', 'nini', 'kwa nini', 'wapi'],
++  },
++  id: {
++    minStem: 3,
++    maxDepth: 2,
++    suffixes: ['annya', 'lah', 'kah', 'pun', 'nya', 'an', 'i', 'kan', 'ku', 'mu'],
++    guards: ['dan', 'atau', 'ini', 'itu', 'tidak', 'adalah', 'saya', 'kami', 'anda', 'apa', 'mengapa', 'di mana', 'sangat', 'juga', 'hanya', 'sudah'],
++  },
++  sq: {
++    minStem: 3,
++    maxDepth: 2,
++    suffixes: ['së', 've', 'sh', 'it', 'ës', 'ë', 't'],
++    guards: ['dhe', 'ose', 'është', 'janë', 'nuk', 'por', 'ky', 'kjo', 'ai', 'ajo', 'unë', 'ne', 'ju', 'çfarë', 'pse', 'ku'],
++  },
++  si: {
++    minStem: 2,
++    maxDepth: 2,
++    suffixes: ['ගේ', 'ට'],
++    guards: ['සහ', 'නැත', 'මෙය', 'ඒ', 'මම', 'අපි', 'ඔබ', 'කුමක්ද', 'ඇයි'],
++  },
++
++  // No safe generative rules: Tibetan and Vietnamese rely on their Hunspell
++  // affix data and behave exactly as before (empty suffix list = no-op).
++  bo: {minStem: 99, maxDepth: 1, suffixes: [], swaps: [], prefixes: [], guards: []},
++  vi: {minStem: 99, maxDepth: 1, suffixes: [], swaps: [], prefixes: [], guards: []},
++};
++
++// Languages whose spec is a close relative's table. Keys are BASE codes
++// (what Intl.Locale().language or split('-')[0] yields).
++export const INFLECTION_ALIASES = {
++  hyw: 'hy', ltg: 'lv', nds: 'de', lb: 'de', af: 'nl', fo: 'is', tk: 'tr',
++  kmr: 'tr', ckb: 'ar', as: 'bn', bs: 'hr', sk: 'cs', nb: 'da', nn: 'sv',
++  an: 'es', gl: 'es', lij: 'it', fur: 'it', oc: 'ca', 'ru-petr1708': 'ru',
++  'ca-valencia': 'ca', 'el-polyton': 'el', gug: 'es',
++};
++
++// Script fallbacks: used when a language has no curated table and no alias,
++// including user-imported packs in any of the 86 languages or beyond.
++export const SCRIPT_SPECS = {
++  latin: LATIN_SPEC,
++  cyrillic: CYRILLIC_SPEC,
++  arabic: ARABIC_SPEC,
++  devanagari: DEVANAGARI_SPEC,
++  hangul: HANGUL_SPEC,
++  greek: GREEK_SPEC,
++  hebrew: HEBREW_SPEC,
++  georgian: GEORGIAN_SPEC,
++};
++
++const SCRIPT_TESTS = [
++  ['hangul', /\p{sc=Hangul}/u],
++  ['cyrillic', /\p{sc=Cyrillic}/u],
++  ['greek', /\p{sc=Greek}/u],
++  ['hebrew', /\p{sc=Hebrew}/u],
++  ['georgian', /\p{sc=Georgian}/u],
++  ['arabic', /\p{sc=Arabic}/u],
++  ['devanagari', /\p{sc=Devanagari}/u],
++  ['latin', /\p{sc=Latin}/u],
++];
++
++// Dominant script of a word, used only to pick a fallback spec.
++export function scriptOf(word) {
++  for (const [name, pattern] of SCRIPT_TESTS) if (pattern.test(word)) return name;
++  return null;
++}
+diff --git a/src/core/morphology.js b/src/core/morphology.js
+new file mode 100644
+index 0000000..884d9f5
+--- /dev/null
++++ b/src/core/morphology.js
+@@ -0,0 +1,198 @@
++// Generative morphology engine. Recognizes inflected, declined, and
++// conjugated forms of dictionary words that the bundled Hunspell affix data
++// does not cover (wordlist-only dictionaries, sparse affix files, personal
++// lists, imported packs). When a word the dictionaries reject decomposes
++// into a known root plus a plausible ending for its language, it is accepted
++// as a real form instead of being reported as a spelling error; the root
++// itself is also offered among the suggestions ("suggesting the main root
++// form").
++//
++// Analysis is bounded: per language at most maxDepth strip/swap steps, a
++// frontier of 24 unverified stems, and a cache of results in the engine, so
++// the worst case stays a few dozen string operations per unknown word.
++import {INFLECTION_SPECS, INFLECTION_ALIASES, SCRIPT_SPECS, scriptOf} from './data/inflections.js';
++
++const MAX_FRONTIER = 24;
++const MAX_ROOTS = 4;
++const MAX_WORD = 48;
++
++// Reject strips where the word ends in a doubled letter and both the suffix
++// and the remaining stem end in that same letter ("walkss" -> "walks" must
++// stay a misspelling, while "boxes" -> "box" and "glasses" -> "glass" pass).
++function doubledBoundary(word, suffix, stem) {
++  const n = word.length;
++  if (n < 2 || word[n - 1] !== word[n - 2]) return false;
++  const letter = word[n - 1];
++  return suffix.endsWith(letter) && stem.endsWith(letter);
++}
++
++// English-style past/gerund gate: a stem that ends vowel+consonant after
++// stripping -ed/-ing only verifies through its silent-e form, so "loved"
++// resolves via "love" while "runing" (rune?) stays flagged.
++const ENDS_VOWEL_CONSONANT = /[aeiouy][bcdfghjklmnpqrstvwxz]$/;
++
++// -es attaches to sibilant stems and thematic -o ("boxes", "houses",
++// "tomatoes"); "walkes", "makees", "knifes" stay misspellings. Only specs
++// that set strictEs (English-style -s plurals) apply this restriction.
++const ES_STEM = /(?:[sxzh]|o)$/;
++
++// Consonant+y stems take -ies/-ied, never -ys/-yed ("studys", "studyed"),
++// while vowel+y stems are regular ("boys", "enjoyed").
++const CONSONANT_Y = /[bcdfghjklmnpqrstvwxz]y$/;
++
++// Consonant+e stems drop the e before -ed/-ing (make -> making, agree ->
++// agreed), so an extra e marks a misspelling ("makeing", "makeed"); vowel+e
++// stems keep it ("seeing", "fleeing").
++const EXTRA_E = /[bcdfghjklmnpqrstvwxz]e$/;
++
++function implausible(word, suffix, stem, spec) {
++  if (doubledBoundary(word, suffix, stem)) return true;
++  if ((suffix === 's' || suffix === 'es' || suffix === 'ed') && CONSONANT_Y.test(stem)) return true;
++  if (suffix === 'es' && spec.strictEs && !ES_STEM.test(stem)) return true;
++  if ((suffix === 'ed' || suffix === 'ing') && word.endsWith('e' + suffix) && EXTRA_E.test(stem)) return true;
++  return false;
++}
++
++function normalize(spec) {
++  if (spec.__normalized) return spec;
++  spec.suffixes = [...new Set(spec.suffixes || [])].sort((a, b) => b.length - a.length);
++  spec.verbs = [...new Set(spec.verbs || [])].sort((a, b) => b.length - a.length);
++  spec.swaps = [...new Set((spec.swaps || []).map(pair => pair.join('\u0000')))]
++    .map(pair => pair.split('\u0000'))
++    .sort((a, b) => b[0].length - a[0].length);
++  spec.prefixes = [...new Set(spec.prefixes || [])].sort((a, b) => b.length - a.length);
++  spec.guards = new Set(spec.guards || []);
++  spec.minStem = spec.minStem ?? 3;
++  spec.maxDepth = spec.maxDepth ?? 2;
++  spec.__normalized = true;
++  return spec;
++}
++
++function* variants(spec, stem) {
++  if (stem.length < spec.minStem) return;
++  yield stem;
++  if (spec.unUmlaut && /[äöü]/.test(stem)) {
++    yield stem.replace(/[äöü]/g, ch => ({'ä': 'a', 'ö': 'o', 'ü': 'u'}[ch]));
++  }
++  if (spec.finalDevoice) {
++    const last = stem.at(-1);
++    if ('zvd'.includes(last)) yield stem.slice(0, -1) + ({z: 's', v: 'f', d: 't'}[last]);
++  }
++}
++
++function* candidates(word, specs, verify) {
++  for (const spec of specs) {
++    const limit = word.length - spec.minStem;
++    for (const suffix of spec.suffixes) {
++      if (suffix.length > limit) continue;
++      if (!word.endsWith(suffix)) continue;
++      const stem = word.slice(0, word.length - suffix.length);
++      if (implausible(word, suffix, stem, spec)) continue;
++      yield* variants(spec, stem);
++    }
++    for (const [from, to] of spec.swaps) {
++      if (from.length > limit) continue;
++      if (!word.endsWith(from)) continue;
++      yield* variants(spec, word.slice(0, word.length - from.length) + to);
++    }
++    for (const prefix of spec.prefixes) {
++      if (prefix.length >= word.length) continue;
++      if (!word.startsWith(prefix)) continue;
++      const stem = word.slice(prefix.length);
++      if (stem.length >= spec.minStem) yield stem;
++    }
++    for (const suffix of spec.verbs) {
++      if (suffix.length > limit) continue;
++      if (!word.endsWith(suffix)) continue;
++      const stem = word.slice(0, word.length - suffix.length);
++      if (implausible(word, suffix, stem, spec)) continue;
++      if (spec.cvcGate && ENDS_VOWEL_CONSONANT.test(stem)) {
++        // Requires the silent-e form; "runing" -> "rune" fails, "making" ->
++        // "make" passes. When the bare stem is itself a word ("run"), the
++        // e-form is a different word, not a missing affix: run -> running,
++        // so the un-doubled spelling stays flagged.
++        if (typeof verify === 'function' && verify(stem)) continue;
++        yield* variants(spec, stem + 'e');
++      } else {
++        yield* variants(spec, stem);
++        if (!stem.endsWith('e')) yield* variants(spec, stem + 'e');
++      }
++    }
++  }
++}
++
++function baseOf(code) {
++  const tag = String(code || '').trim() || 'en';
++  try { return new Intl.Locale(tag).language.toLowerCase(); } catch { return tag.split('-')[0].toLowerCase(); }
++}
++
++export class Morphology {
++  constructor(code) {
++    const base = baseOf(code);
++    const key = INFLECTION_ALIASES[base] || base;
++    this.primary = INFLECTION_SPECS[key] ? normalize(INFLECTION_SPECS[key]) : null;
++    this.maxDepth = this.primary ? this.primary.maxDepth : 2;
++    for (const spec of Object.values(SCRIPT_SPECS)) normalize(spec);
++  }
++
++  static forLanguage(code) {
++    Morphology.cache ||= new Map();
++    const base = baseOf(code);
++    let morph = Morphology.cache.get(base);
++    if (!morph) {
++      morph = new Morphology(base);
++      Morphology.cache.set(base, morph);
++    }
++    return morph;
++  }
++
++  // Active specs for a word: the language's curated table, or, when the
++  // language has none, the fallback table for the word's script (so any
++  // language, bundled or imported, gets its script's core inflections).
++  specsFor(word) {
++    if (this.primary) return [this.primary];
++    const script = scriptOf(word);
++    const spec = script ? SCRIPT_SPECS[script] : null;
++    return spec ? [spec] : [];
++  }
++
++  // Verified root forms of an inflected word, best first. `verify` decides
++  // whether a candidate stem is a known word (dictionary / personal list).
++  roots(word, verify, {first = false} = {}) {
++    const w = String(word || '');
++    if (w.length < 2 || w.length > MAX_WORD) return [];
++    const specs = this.specsFor(w);
++    if (!specs.length) return [];
++    const guards = specs.reduce((all, spec) => (spec.guards.size ? all.concat([...spec.guards]) : all), []);
++    const guardSet = new Set(guards);
++    const seen = new Set([w]);
++    const found = [];
++    let frontier = [w];
++    for (let depth = 0; depth < this.maxDepth && frontier.length; depth++) {
++      // Verb endings (past/gerund) attach directly to a stem: chaining them
++      // would only legitimize stacked typos like "walkeded".
++      const active = depth === 0 ? specs : specs.map(spec => (spec.verbs.length ? {...spec, verbs: []} : spec));
++      const next = [];
++      for (const current of frontier) {
++        for (const stem of candidates(current, active, verify)) {
++          if (seen.has(stem)) continue;
++          seen.add(stem);
++          if (guardSet.has(stem)) continue;
++          if (verify(stem)) {
++            found.push(stem);
++            if (first || found.length >= MAX_ROOTS) return found;
++          } else {
++            next.push(stem);
++          }
++        }
++      }
++      if (next.length > MAX_FRONTIER) next.length = MAX_FRONTIER;
++      frontier = next;
++    }
++    return found;
++  }
++
++  lemmatize(word, verify) {
++    return this.roots(word, verify, {first: true}).length > 0;
++  }
++}
+diff --git a/tests/morphology.test.mjs b/tests/morphology.test.mjs
+new file mode 100644
+index 0000000..e0365a3
+--- /dev/null
++++ b/tests/morphology.test.mjs
+@@ -0,0 +1,231 @@
++// Tests for the cross-language morphology layer: inflected, declined, and
++// conjugated forms of known roots are accepted instead of flagged, typos
++// that only look like inflections stay flagged, and unknown words fall back
++// to suggestions of their main root form. Dictionary data comes from the
++// dictionary-* packages, so these run offline.
++import test from 'node:test';
++import assert from 'node:assert/strict';
++import en from 'dictionary-en';
++import es from 'dictionary-es';
++import fr from 'dictionary-fr';
++import de from 'dictionary-de';
++import ru from 'dictionary-ru';
++import tr from 'dictionary-tr';
++import ko from 'dictionary-ko';
++import {ProofEngine} from '../src/core/checker.js';
++import {Morphology} from '../src/core/morphology.js';
++import {LazyHunspell} from '../src/core/lazy-hunspell.js';
++
++const known = words => {
++  const set = new Set(words);
++  return stem => set.has(stem);
++};
++
++// --- Language resolution ---
++
++test('morphology resolves variants and aliases onto curated tables', () => {
++  assert.equal(Morphology.forLanguage('en-GB').primary, Morphology.forLanguage('en-US').primary);
++  assert.equal(Morphology.forLanguage('ca-valencia').primary, Morphology.forLanguage('ca').primary);
++  assert.equal(Morphology.forLanguage('hyw').primary, Morphology.forLanguage('hy').primary);
++  assert.equal(Morphology.forLanguage('nds').primary, Morphology.forLanguage('de').primary);
++  assert.equal(Morphology.forLanguage('ckb').primary, Morphology.forLanguage('ar').primary);
++  assert.equal(Morphology.forLanguage('nn').primary, Morphology.forLanguage('sv').primary);
++});
++
++test('languages without a curated table fall back to their script', () => {
++  const unknown = Morphology.forLanguage('zz');
++  assert.equal(unknown.primary, null);
++  assert.equal(unknown.specsFor('houses')[0].strictEs, true, 'latin fallback applies');
++  assert.equal(unknown.specsFor('houses')[0].suffixes.includes('ing'), false, 'generic latin stays conservative');
++  assert.ok(unknown.specsFor('книги').length, 'cyrillic fallback applies');
++  assert.ok(unknown.specsFor('الكتاب').length, 'arabic fallback applies');
++  assert.ok(unknown.specsFor('사랑은').length, 'hangul fallback applies');
++  assert.ok(unknown.specsFor('चलता').length, 'devanagari fallback applies');
++});
++
++test('every bundled language code resolves to an active spec', () => {
++  const codes = ['en-US', 'en-GB', 'be', 'bg', 'bn', 'bo', 'br', 'bs', 'ca', 'cs', 'cy', 'da', 'de', 'el', 'eo', 'es', 'et', 'eu', 'fa', 'fo', 'fr', 'fur', 'fy', 'ga', 'gd', 'gl', 'gu', 'gug', 'he', 'hi', 'hr', 'hu', 'hy', 'hyw', 'ia', 'id', 'ie', 'is', 'isv', 'it', 'ka', 'kmr', 'kn', 'ko', 'la', 'lb', 'lij', 'lt', 'ltg', 'lv', 'mk', 'mn', 'mr', 'nds', 'ne', 'nl', 'nn', 'oc', 'or', 'pa', 'pt', 'ro', 'ru', 'sa', 'si', 'sq', 'sr', 'sv', 'sw', 'ta', 'te', 'tk', 'tr', 'uk', 'vi', 'af', 'an', 'ar', 'as', 'ckb'];
++  for (const code of codes) {
++    const morph = Morphology.forLanguage(code);
++    assert.ok(morph.specsFor('words').length, `${code} resolves a spec for Latin-script words`);
++  }
++});
++
++// --- Root-form recognition (unit level) ---
++
++test('English inflections resolve to their roots', () => {
++  const morph = Morphology.forLanguage('en-US');
++  const roots = (word, dict) => morph.roots(word, known(dict));
++  assert.deepEqual(roots('cats', ['cat']), ['cat']);
++  assert.deepEqual(roots('boxes', ['box']), ['box']);
++  assert.deepEqual(roots('houses', ['house']), ['house']);
++  assert.deepEqual(roots('tomatoes', ['tomato']), ['tomato']);
++  assert.deepEqual(roots('studies', ['study']), ['study']);
++  assert.deepEqual(roots('wolves', ['wolf']), ['wolf']);
++  assert.deepEqual(roots('walking', ['walk']), ['walk']);
++  assert.deepEqual(roots('walked', ['walk']), ['walk']);
++  assert.deepEqual(roots('loved', ['love']), ['love']);
++  assert.deepEqual(roots('making', ['make']), ['make']);
++  assert.deepEqual(roots('seeing', ['see']), ['see']);
++  assert.deepEqual(roots('enjoys', ['enjoy']), ['enjoy']);
++  assert.deepEqual(roots("children's", ['children']), ['children']);
++});
++
++test('English typos that only look like inflections stay unrecognized', () => {
++  const morph = Morphology.forLanguage('en-US');
++  const roots = (word, dict) => morph.roots(word, known(dict));
++  const words = ['cat', 'walk', 'walks', 'make', 'love', 'study', 'see', 'agree'];
++  assert.deepEqual(roots('thes', words), [], 'stopword stems are guarded');
++  assert.deepEqual(roots('runing', words), [], 'missing doubling stays a typo');
++  assert.deepEqual(roots('walkss', words), [], 'doubled suffix boundary stays a typo');
++  assert.deepEqual(roots('walkeded', words), [], 'stacked endings stay a typo');
++  assert.deepEqual(roots('studys', words), [], 'consonant+y takes -ies');
++  assert.deepEqual(roots('studyed', words), [], 'consonant+y takes -ied');
++  assert.deepEqual(roots('walkes', words), [], '-es needs a sibilant stem');
++  assert.deepEqual(roots('makees', words), [], '-es needs a sibilant stem');
++  assert.deepEqual(roots('makeing', words), [], 'extra e before -ing stays a typo');
++  assert.deepEqual(roots('makeed', words), [], 'extra e before -ed stays a typo');
++  assert.deepEqual(roots('looved', words), [], 'extra o stays a typo');
++  assert.deepEqual(roots('agreeds', words), []);
++});
++
++test('agglutinative and fusional languages resolve chains to their roots', () => {
++  assert.deepEqual(Morphology.forLanguage('de').roots('häusern', known(['haus'])), ['haus']);
++  assert.deepEqual(Morphology.forLanguage('tr').roots('evlerde', known(['ev'])), ['ev']);
++  assert.deepEqual(Morphology.forLanguage('tr').roots('evimdeki', known(['ev'])), ['ev']);
++  assert.deepEqual(Morphology.forLanguage('hu').roots('házakban', known(['ház'])), ['ház']);
++  assert.deepEqual(Morphology.forLanguage('ru').roots('книги', known(['книга'])), ['книга']);
++  assert.deepEqual(Morphology.forLanguage('ru').roots('коты', known(['кот'])), ['кот']);
++  assert.deepEqual(Morphology.forLanguage('ko').roots('사랑은의', known(['사랑'])), ['사랑']);
++  assert.deepEqual(Morphology.forLanguage('ar').roots('الكتاب', known(['كتاب'])), ['كتاب']);
++  assert.deepEqual(Morphology.forLanguage('ar').roots('والكتابات', known(['كتاب'])), ['كتاب']);
++  assert.deepEqual(Morphology.forLanguage('hi').roots('चलता', known(['चल'])), ['चल']);
++  assert.deepEqual(Morphology.forLanguage('es').roots('mujeres', known(['mujer'])), ['mujer']);
++  assert.deepEqual(Morphology.forLanguage('es').roots('hablando', known(['hablar'])), ['hablar']);
++  assert.deepEqual(Morphology.forLanguage('nl').roots('huizen', known(['huis'])), ['huis']);
++});
++
++// --- Engine integration: wordlist-only dictionaries ---
++
++const wordEngine = (language, words) => {
++  const engine = new ProofEngine(null, {}, {});
++  engine.configure({packs: [{id: 'test.words', kind: 'wordlist', language, enabled: true, words, rules: []}], language});
++  return engine;
++};
++
++test('wordlist-only dictionaries accept inflected forms across languages', () => {
++  const en = wordEngine('en-US', ['cat', 'walk', 'study', 'wolf', 'box', 'house']);
++  for (const word of ['cats', 'walked', 'walking', 'studies', 'wolves', 'boxes', 'houses']) assert.equal(en.correct(word), true, word);
++  for (const word of ['thes', 'runing', 'walkss', 'walkeded', 'studys', 'walkes', 'makeing', 'looved', 'catses', 'catsed']) assert.equal(en.correct(word), false, word);
++
++  const es = wordEngine('es', ['gato', 'casa', 'mujer', 'hablar']);
++  for (const word of ['gatos', 'casas', 'mujeres', 'hablando', 'hablamos']) assert.equal(es.correct(word), true, word);
++  for (const word of ['hablendo', 'gatox']) assert.equal(es.correct(word), false, word);
++
++  const de = wordEngine('de', ['Haus']);
++  assert.equal(de.correct('Häusern'), true);
++  assert.equal(de.correct('Hauses'), true);
++  assert.equal(de.correct('Hausx'), false);
++
++  const ru = wordEngine('ru', ['книга', 'стол', 'кот']);
++  for (const word of ['книги', 'кота', 'коты', 'столом']) assert.equal(ru.correct(word), true, word);
++  assert.equal(ru.correct('книгга'), false);
++
++  const tr = wordEngine('tr', ['ev', 'kitap']);
++  for (const word of ['evlerde', 'evimde', 'kitapta']) assert.equal(tr.correct(word), true, word);
++  assert.equal(tr.correct('evlerdz'), false);
++
++  const ko = wordEngine('ko', ['사랑']);
++  for (const word of ['사랑은', '사랑이', '사랑에서', '사랑은의']) assert.equal(ko.correct(word), true, word);
++
++  const ar = wordEngine('ar', ['كتاب']);
++  for (const word of ['الكتاب', 'كتابات', 'والكتاب']) assert.equal(ar.correct(word), true, word);
++
++  const hi = wordEngine('hi', ['चल', 'पढ़']);
++  assert.equal(hi.correct('चलता'), true);
++  assert.equal(hi.correct('पढ़ते'), true);
++
++  const hu = wordEngine('hu', ['ház']);
++  assert.equal(hu.correct('házakban'), true);
++});
++
++test('unknown inflected words fall back to root-form suggestions', () => {
++  const tr = wordEngine('tr', ['ev', 'kitap']);
++  assert.ok(tr.suggest('evlerimdeki').includes('ev'), 'root form is suggested');
++  assert.deepEqual(tr.suggest('evxler'), [], 'non-inflectional typos get no root suggestion');
++
++  const ko = wordEngine('ko', ['사랑']);
++  assert.ok(ko.suggest('사랑은의').includes('사랑'), 'root form is suggested');
++});
++
++// --- Engine integration: bundled dictionaries ---
++
++test('bundled dictionaries accept real inflections and still flag typos', () => {
++  const enEngine = new ProofEngine(en, {}, {});
++  enEngine.configure({language: 'en-US'});
++  for (const word of ['cats', 'walked', 'walking', 'studies']) assert.equal(enEngine.correct(word), true, word);
++  for (const word of ['runing', 'thes', 'walkeded', 'makeing', 'studys', 'walkes', 'recieve']) assert.equal(enEngine.correct(word), false, word);
++  const issues = enEngine.check('the runing cat', {language: 'en-US'});
++  assert.ok(issues.some(i => i.original === 'runing'), 'runing is flagged');
++  assert.ok(!issues.some(i => i.original === 'cat' && i.category === 'spelling'), 'cat is clean');
++
++  const esEngine = new ProofEngine(es, {}, {});
++  esEngine.configure({language: 'es-ES'});
++  for (const word of ['gatos', 'casas', 'mujeres', 'hablamos']) assert.equal(esEngine.correct(word), true, word);
++  assert.equal(esEngine.correct('hablendo'), false);
++
++  const frEngine = new ProofEngine(fr, {}, {});
++  frEngine.configure({language: 'fr-FR'});
++  assert.equal(frEngine.correct('maisons'), true);
++  assert.equal(frEngine.correct('grandes'), true);
++  assert.equal(frEngine.correct('maisonss'), false);
++
++  const deEngine = new ProofEngine(de, {}, {});
++  deEngine.configure({language: 'de-DE'});
++  assert.equal(deEngine.correct('Häusern'), true);
++  assert.equal(deEngine.correct('Hause'), true);
++
++  const ruEngine = new ProofEngine(ru, {}, {});
++  ruEngine.configure({language: 'ru-RU'});
++  assert.equal(ruEngine.correct('книгами'), true);
++  assert.equal(ruEngine.correct('книгга'), false);
++
++  const trEngine = new ProofEngine(tr, {}, {});
++  trEngine.configure({language: 'tr-TR'});
++  assert.equal(trEngine.correct('evlerde'), true);
++  assert.equal(trEngine.correct('evlerdz'), false);
++
++  const koEngine = new ProofEngine(ko, {}, {});
++  koEngine.configure({language: 'ko-KR'});
++  assert.equal(koEngine.correct('사랑'), true);
++  assert.equal(koEngine.correct('사랑은'), true, 'particle-attached forms are accepted');
++});
++
++// --- Capability gating ---
++
++test('generative morphology covers forms the affix tables miss', () => {
++  // dictionary-ko lists verb conjugations in its affix file but no nominal
++  // particles: the generative layer is what accepts josa-attached nouns.
++  // LazyHunspell mirrors the worker's bundled-dictionary path.
++  const koEngine = new ProofEngine(new LazyHunspell(ko, {}), {}, {});
++  koEngine.configure({language: 'ko-KR'});
++  assert.equal(koEngine.correct('사랑은'), true, 'particle-attached forms are accepted');
++  assert.equal(koEngine.correct('사랑ㅋ'), false);
++  assert.equal(koEngine.correct('사랑x'), false);
++
++  const sparse = new LazyHunspell({aff: '', dic: '2\ncat\ndog\n'}, {});
++  const sparseEngine = new ProofEngine(sparse, {}, {});
++  sparseEngine.configure({language: 'en-US'});
++  assert.equal(sparseEngine.correct('cats'), true);
++  assert.equal(sparseEngine.correct('catss'), false);
++
++  const bare = new ProofEngine(null, {}, {});
++  bare.configure({language: 'en-US'});
++  assert.equal(bare.correct('cats'), false, 'with no known words nothing is accepted');
++});
++
++test('analysis stays bounded on pathological input', () => {
++  const engine = wordEngine('en-US', ['cat']);
++  for (let i = 0; i < 2000; i++) engine.correct('cats' + 'e'.repeat(i % 7) + 's'.repeat(i % 5));
++  assert.equal(engine.correct('cats'), true);
++});
+-- 
+2.47.3
+

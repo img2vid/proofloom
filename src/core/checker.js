@@ -7,6 +7,7 @@
 //  - OCR restoration heuristics
 import nspell from 'nspell';
 import {LazyHunspell} from './lazy-hunspell.js';
+import {Morphology} from './morphology.js';
 import {REGEX_RULES, LITERAL_RULES, LITERAL_TRIGGER_INDEX, matchCase, replacementFor, ruleCounts, CONFUSION_SETS} from './rules/index.js';
 import {compilePackRules} from './resources.js';
 import {matchLiteralRules} from './rules/literal.js';
@@ -53,6 +54,12 @@ export class ProofEngine {
   constructor(dictionary, corrections = {}, options = {}) {
     this.spell = dictionary ? (typeof dictionary.correct === 'function' && typeof dictionary.suggest === 'function' ? dictionary : nspell(dictionary)) : null;
     for (const word of EXTRA_WORDS) this.spell?.add(word);
+    // Generative morphology (see ./morphology.js) always runs as the last
+    // resort in correct(): dictionaries with rich affix tables accept their
+    // inflections themselves, and the generative layer only sees the words
+    // every dictionary rejected.
+    this.morphology = Morphology.forLanguage('en-US');
+    this.morphCache = new Map();
     this.corrections = corrections;
     this.cache = new Map();
     this.extraSpells = [];
@@ -73,6 +80,8 @@ export class ProofEngine {
   configure({packs = [], personal = [], language = 'en-US'} = {}) {
     this.language = language;
     this.english = language.split('-')[0] === 'en';
+    this.morphology = Morphology.forLanguage(language);
+    this.morphCache.clear();
     this.british = /^en-(GB|IN|AU|NZ|IE)/i.test(language);
     this.personal = new Set(personal.map(x => x.toLocaleLowerCase(language)));
     this.wordlist = new Set();
@@ -85,6 +94,30 @@ export class ProofEngine {
     this.cache.clear();
   }
 
+  // A word counts as known when it or any of its inflected forms resolves
+  // to a dictionary, personal-list, or domain entry.
+  knownRoot(stem) {
+    if (this.personal?.has(stem) || this.wordlist?.has(stem) || this.domainWords?.has(stem)) return true;
+    if (this.extraSpells.some(s => s.correct(stem))) return true;
+    return !!(this.spell?.correct(stem));
+  }
+
+  // Generative fallback: accept an unknown word when it decomposes into a
+  // known root plus a plausible inflection for the document language
+  // (inflections, declensions, conjugations are not spelling errors).
+  acceptsInflection(word) {
+    if (!this.morphology) return false;
+    const cached = this.morphCache.get(word);
+    if (cached !== undefined) return cached;
+    let ok = false;
+    if (word.length >= 2 && word.length <= 48 && !/\p{N}/u.test(word)) {
+      ok = this.morphology.lemmatize(word, stem => this.knownRoot(stem));
+    }
+    if (this.morphCache.size >= 4000) this.morphCache.clear();
+    this.morphCache.set(word, ok);
+    return ok;
+  }
+
   correct(word) {
     const lower = word.toLocaleLowerCase(this.language);
     if (this.personal?.has(lower) || this.wordlist?.has(lower)) return true;
@@ -92,7 +125,8 @@ export class ProofEngine {
     if (this.extraSpells.some(s => s.correct(word))) return true;
     // The primary dictionary always matches the document language (English
     // variants and every bundled language alike), so consult it directly.
-    return !!(this.spell?.correct(word) || this.spell?.correct(lower));
+    if (this.spell?.correct(word) || this.spell?.correct(lower)) return true;
+    return this.acceptsInflection(lower);
   }
 
   frequencyRank(word) {
@@ -150,6 +184,11 @@ export class ProofEngine {
         ? rankSuggestions(word, candidates.map(w => ({word: w, distance: 1})), {limit: 5, frequencyRank: this.frequency})
             .map(s => ({word: s.word, score: s.score}))
         : candidates.slice(0, 5).map((w, i) => ({word: w, score: .9 - i * .06}));
+    }
+    // Last resort for unknown words in any language: offer the main root
+    // form of a plausible inflection ("walkss" -> "walk", "Hauss" -> "haus").
+    if (!scored.length && this.morphology) {
+      for (const root of this.morphology.roots(lower, stem => this.knownRoot(stem))) scored.push({word: root, score: .5});
     }
     const result = [...new Map(scored.map(s => [s.word.toLowerCase(), s])).values()]
       .sort((a, b) => b.score - a.score).slice(0, 5)
