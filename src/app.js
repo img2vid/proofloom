@@ -127,7 +127,7 @@ function issueKey(i){return `${i.ruleId}|${i.start}|${i.original}`;}
 function renderAssistant(){
   state.issues=visibleIssues();if(!$('#assistant'))return;
   const list=$('#suggestions-list'),scroll=list?.scrollTop||0;
-  $('#assistant').innerHTML=assistantView({...state,issues:state.issues});
+  $('#assistant').innerHTML=assistantView({...state,issues:state.issues,text:currentText()});
   hydrateIcons($('#assistant'));
   if($('#suggestions-list'))$('#suggestions-list').scrollTop=scroll;
 }

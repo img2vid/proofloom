@@ -1,0 +1,309 @@
+From 3151701c141ab900f15e3c657a0b4366c31c8c87 Mon Sep 17 00:00:00 2001
+From: Proofloom Contributor <proofloom-contributor@users.noreply.github.com>
+Date: Sun, 1 Nov 2026 00:46:25 +0000
+Subject: [PATCH] Show example and corrected sentence for each replacement in
+ the assistant pane
+
+Every card in the writing assistant now quotes the sentence that contains
+the flagged text and rewrites it with the chosen replacement, so the
+suggestion can be judged in context instead of as an isolated word pair.
+
+- Add src/core/sentence.js: a DOM-free sentenceContext() helper that finds
+  the sentence containing an issue range (bounded scan, breaks on sentence
+  punctuation including CJK/Arabic terminators and line breaks, keeps
+  decimals intact) and returns the example sentence, the corrected
+  sentence, the offsets to mark, and window-clip flags.
+- Render the two rows in each assistant card; the corrected row follows
+  the alternative picked in the card's dropdown, and cards without a
+  replacement show the example sentence on its own.
+- Pass the current chapter text into assistantView from renderAssistant.
+- Style the rows to match the card design; flagged text keeps the red
+  del treatment, the replacement gets the green ins pill, clipped
+  sentences get ellipsis markers.
+- Cover the helper with tests/sentence.test.mjs (13 cases).
+---
+ README.md               |   2 +-
+ src/app.js              |   2 +-
+ src/core/sentence.js    |  68 ++++++++++++++++++++++++++
+ src/style.css           |  10 ++++
+ src/views.js            |  17 ++++++-
+ tests/sentence.test.mjs | 106 ++++++++++++++++++++++++++++++++++++++++
+ 6 files changed, 201 insertions(+), 4 deletions(-)
+ create mode 100644 src/core/sentence.js
+ create mode 100644 tests/sentence.test.mjs
+
+diff --git a/README.md b/README.md
+index 9d733d8..c4b66fd 100644
+--- a/README.md
++++ b/README.md
+@@ -12,7 +12,7 @@ A complete, static proofreading and OCR restoration website designed for GitHub
+ - **Ten readability formulas** (Flesch Reading Ease, Flesch-Kincaid, Gunning Fog, SMOG, Coleman-Liau, ARI, Linsear Write, Dale-Chall, FORCAST, Spache) with Dale-Chall and Spache familiar-word lists, displayed in a readability panel.
+ - **Sentence-level style analysis**: sentence-length variance, repeated sentence starts, adverb density, nominalization and weasel-word density, and a passive-voice detector — all review-only suggestions.
+ - **36 bundled language dictionaries** (7 million+ Hunspell entries): Bulgarian, Catalan, Czech, Danish, German, Greek, Esperanto, Spanish, Estonian, Basque, Persian, French, Irish, Galician, Hebrew, Croatian, Hungarian, Icelandic, Italian, Korean, Lithuanian, Latvian, Norwegian Bokmål, Dutch, Norwegian Nynorsk, Polish, Portuguese, Romanian, Russian, Slovak, Slovenian, Serbian, Swedish, Turkish, Ukrainian, and Vietnamese — gzipped, loaded on demand for the document's language, with morphology-aware, frequency-ranked suggestions. American and British English remain fully bundled; Indian English uses the British dictionary and spelling policy.
+-- Suggestions with explanations, alternatives, confidence estimates, ignore controls, personal words, individual rule disabling, safe bulk fixes, undo/redo, checkpoints, literal find/replace, focus mode, and reading statistics. **Click-to-correct in the editor**: click any highlighted word to open a correction popover anchored to that word and rewrite the text in place, with ignore, add-to-dictionary, and rule-disable actions.
++- Suggestions with explanations, alternatives, confidence estimates, an example sentence and a corrected sentence for every replacement in the assistant pane, ignore controls, personal words, individual rule disabling, safe bulk fixes, undo/redo, checkpoints, literal find/replace, focus mode, and reading statistics. **Click-to-correct in the editor**: click any highlighted word to open a correction popover anchored to that word and rewrite the text in place, with ignore, add-to-dictionary, and rule-disable actions.
+ - Import of TXT, Markdown, HTML/XHTML, DOCX, ODT, basic RTF, EPUB, FB2, PDF, SRT/VTT, and images. EPUB follows the package spine; PDFs become one section per page. Whole-book review checks every section, produces a report, and can apply safe fixes with a checkpoint.
+ - CPU-based English OCR with bundled Tesseract.js, WebAssembly cores, and trained data, plus OCR restoration suggestions for ligatures, soft hyphens, broken line-end words, letter/digit confusion, and merged/split letters.
+ - New text-based TXT, Markdown, HTML, DOCX, and EPUB exports; browser printing for PDF.
+diff --git a/src/app.js b/src/app.js
+index 5892bd2..86fc410 100644
+--- a/src/app.js
++++ b/src/app.js
+@@ -127,7 +127,7 @@ function issueKey(i){return `${i.ruleId}|${i.start}|${i.original}`;}
+ function renderAssistant(){
+   state.issues=visibleIssues();if(!$('#assistant'))return;
+   const list=$('#suggestions-list'),scroll=list?.scrollTop||0;
+-  $('#assistant').innerHTML=assistantView({...state,issues:state.issues});
++  $('#assistant').innerHTML=assistantView({...state,issues:state.issues,text:currentText()});
+   hydrateIcons($('#assistant'));
+   if($('#suggestions-list'))$('#suggestions-list').scrollTop=scroll;
+ }
+diff --git a/src/core/sentence.js b/src/core/sentence.js
+new file mode 100644
+index 0000000..1617b29
+--- /dev/null
++++ b/src/core/sentence.js
+@@ -0,0 +1,68 @@
++// Sentence-context previews for the writing-assistant pane. DOM-free and
++// pure: given the document text and an issue range, return the sentence
++// that contains it together with the same sentence rewritten with a chosen
++// replacement, so every suggestion card can show an example and a corrected
++// sentence side by side.
++
++// A sentence boundary is sentence-ending punctuation — ASCII plus the CJK,
++// Arabic, and interrobang variants — optionally followed by closing quotes
++// or brackets and then whitespace or a letter (which keeps "3.14" intact
++// while still breaking after "。" with no trailing space), or any run of
++// line breaks: headings, list items, and poem lines start their own
++// sentence. This is a display heuristic, not a syntactic parse; common
++// abbreviations ("Dr.", "e.g.") can shorten a preview, never corrupt the
++// flagged range itself.
++const BACKWARD = /[.!?…。！？؟‽]+["'”’»)\]]*(?=\s|\p{L}|\n|$)|\n+/gu;
++const FORWARD = /[.!?…。！？؟‽]+["'”’»)\]]*(?=\s|\p{L}|\n|$)|\n+/gu;
++
++// Characters scanned on each side of the flagged range while looking for
++// the sentence that contains it. Bounds the work done per suggestion card
++// and keeps very long sentences out of the pane.
++const WINDOW = 400;
++
++export function sentenceContext(text, issue, replacement) {
++  if (typeof text !== 'string' || !issue || typeof issue !== 'object') return null;
++  const {start, end} = issue;
++  if (!Number.isInteger(start) || !Number.isInteger(end)) return null;
++  if (start < 0 || end <= start || end > text.length) return null;
++  // Callers may pass the alternative picked in the card's dropdown; without
++  // one, fall back to the issue's first replacement.
++  if (replacement === undefined) replacement = issue.replacements?.[0] ?? null;
++
++  const windowStart = Math.max(0, start - WINDOW);
++  const windowEnd = Math.min(text.length, end + WINDOW);
++
++  // Walk backwards over every boundary before the flagged range; the last
++  // one found opens the sentence.
++  const head = text.slice(windowStart, start);
++  BACKWARD.lastIndex = 0;
++  let match, sentenceStart = windowStart;
++  while ((match = BACKWARD.exec(head))) sentenceStart = windowStart + match.index + match[0].length;
++
++  // The first boundary at or after the range closes the sentence.
++  FORWARD.lastIndex = 0;
++  const close = FORWARD.exec(text.slice(end, windowEnd));
++  let sentenceEnd = close ? end + close.index + close[0].length : windowEnd;
++
++  // Trim surrounding whitespace without ever eating into the flagged range.
++  while (sentenceStart < start && /\s/.test(text[sentenceStart])) sentenceStart++;
++  while (sentenceEnd > end && /\s/.test(text[sentenceEnd - 1])) sentenceEnd--;
++
++  const sentence = text.slice(sentenceStart, sentenceEnd);
++  if (!sentence) return null;
++  const corrected = replacement == null ? null
++    : text.slice(sentenceStart, start) + replacement + text.slice(end, sentenceEnd);
++  return {
++    sentence,
++    corrected,
++    // Offsets of the flagged range inside `sentence`; inside `corrected` the
++    // replacement occupies [from, from + replaced.length).
++    from: start - sentenceStart,
++    to: end - sentenceStart,
++    replaced: replacement == null ? '' : replacement,
++    // The preview reaches the scan window edge, so the sentence likely
++    // continues beyond it and the view may show an ellipsis.
++    startClipped: windowStart > 0 && sentenceStart === windowStart,
++    endClipped: windowEnd < text.length && sentenceEnd === windowEnd,
++  };
++}
+diff --git a/src/style.css b/src/style.css
+index 0eecfcf..ceb093b 100644
+--- a/src/style.css
++++ b/src/style.css
+@@ -42,3 +42,13 @@
+ .quickfix-footer{display:flex;gap:4px;flex-wrap:wrap;border-top:1px solid var(--border);padding-top:7px;margin-top:5px}
+ .quickfix-action{border:0;background:transparent;color:var(--green);font-size:12px;padding:4px 7px;border-radius:6px}
+ .quickfix-action:hover,.quickfix-action:focus-visible{background:var(--mint);outline:none}
++/* Example and corrected sentence previews in the assistant pane. */
++.sentence-examples{display:grid;gap:6px;margin:11px 0 2px}
++.sentence-row{display:flex;align-items:flex-start;gap:9px;background:#f7f9f0;border:1px solid #e7ecd7;border-radius:6px;padding:8px 10px}
++.sentence-row.corrected{background:#f1f6e7;border-color:#dbe5c8}
++.sentence-tag{flex-shrink:0;min-width:56px;margin-top:3px;font-size:8px;font-weight:600;letter-spacing:.5px;text-transform:uppercase;color:#98a184}
++.sentence-row.corrected .sentence-tag{color:#5f7d4c}
++.sentence-text{margin:0;font-family:Newsreader,Georgia,serif;font-size:14px;line-height:1.55;color:#48584a;overflow-wrap:anywhere}
++.sentence-text del{color:#ba8e78;text-decoration-color:#ba8e7866}
++.sentence-text ins{color:#617d50;text-decoration:none;background:#e3ecd2;border-radius:3px;padding:0 4px}
++.sentence-ellipsis{color:#b4bc9f;margin:0 2px}
+diff --git a/src/views.js b/src/views.js
+index 7fc5e7f..55c4bdc 100644
+--- a/src/views.js
++++ b/src/views.js
+@@ -1,5 +1,6 @@
+ import {e,icon,heading,btn,relativeDate} from './ui.js';
+ import {languageExtensions} from './extensions.js';
++import {sentenceContext} from './core/sentence.js';
+ export const PRESETS=[['general','General writing'],['academic','Academic writing'],['business','Business writing'],['creative','Creative writing']];
+ export function languageOptions(ctx,selected){
+   const languages=new Map([['en-US','English (US)'],['en-GB','English (UK)'],['en-IN','English (India)']]);
+@@ -27,8 +28,20 @@ export function editorView(ctx){
+     <div class="paper-footer"><span>${icon('lock')}Private by default. Your draft stays in this browser.</span><button data-action="check">${icon('refresh')}<span id="check-label">Check text</span></button></div></div>
+     <aside class="assistant" id="assistant" aria-label="Writing assistant"></aside></div>`;
+ }
++// Example and corrected sentence rows for one suggestion card. The
++// corrected sentence follows the alternative chosen in the card's dropdown;
++// cards without a replacement show the example sentence on its own.
++function sentenceRows(text,issue,choice){
++  const context=sentenceContext(text,issue,choice==null?null:issue.replacements?.[choice]??null);
++  if(!context)return '';
++  const clip=clipped=>clipped?'<span class="sentence-ellipsis" aria-hidden="true">…</span>':'';
++  const flow=value=>e(value).replace(/\n/g,' ↵ ');
++  const example=clip(context.startClipped)+flow(context.sentence.slice(0,context.from))+`<del>${flow(context.sentence.slice(context.from,context.to))}</del>`+flow(context.sentence.slice(context.to))+clip(context.endClipped);
++  const corrected=context.corrected==null?'':clip(context.startClipped)+flow(context.corrected.slice(0,context.from))+`<ins>${flow(context.corrected.slice(context.from,context.from+context.replaced.length))}</ins>`+flow(context.corrected.slice(context.from+context.replaced.length))+clip(context.endClipped);
++  return `<div class="sentence-examples"><div class="sentence-row"><span class="sentence-tag">Example</span><p class="sentence-text">${example}</p></div>${corrected?`<div class="sentence-row corrected"><span class="sentence-tag">Corrected</span><p class="sentence-text">${corrected}</p></div>`:''}</div>`;
++}
+ export function assistantView(ctx){
+-  const {issues=[],metrics={},checking,filter,selectedId,capped,choices={},readability}=ctx;
++  const {issues=[],metrics={},checking,filter,selectedId,capped,choices={},readability,text=''}=ctx;
+   const count=cat=>issues.filter(i=>cat==='correctness'?['spelling','grammar','punctuation'].includes(i.category):i.category===cat).length;
+   const score=metrics.words?Math.max(0,Math.round(100-Math.min(100,issues.reduce((n,i)=>n+(i.category==='style'?.4:i.category==='ocr'?.8:1),0)/Math.max(25,metrics.words)*190))):100;
+   const displayed=issues.map((i,index)=>({...i,index})).filter(i=>filter==='all'||filter==='correctness'?filter==='all'||['spelling','grammar','punctuation'].includes(i.category):i.category===filter);
+@@ -37,7 +50,7 @@ export function assistantView(ctx){
+   <div class="issue-summary"><span class="summary-pill">${count('correctness')} correctness</span><span class="summary-pill purple">${count('style')} style</span><span class="summary-pill green">${count('ocr')} OCR</span></div>
+   <div class="assistant-tabs" role="tablist" aria-label="Suggestion categories">${[['all','All',issues.length],['correctness','Correctness',count('correctness')],['style','Style',count('style')],['ocr','OCR',count('ocr')]].map(([v,l,n])=>`<button role="tab" aria-selected="${filter===v}" class="${filter===v?'active':''}" data-action="filter" data-filter="${v}">${l}<span>${n}</span></button>`).join('')}</div>
+   <div class="suggestions-top"><span>${checking?'Checking…':displayed.length+' suggestion'+(displayed.length===1?'':'s')}</span><button data-action="apply-safe" ${issues.some(i=>i.safe&&i.replacements.length)&&!checking?'':'disabled'} title="Apply only high-confidence spelling, spacing, and character fixes">${icon('check')}Apply safe fixes</button></div>
+-  <div class="suggestions-list" id="suggestions-list">${readabilityStrip||''}${displayed.slice(0,80).map(i=>`<article class="suggestion ${selectedId===i.id?'selected':''}" data-select-issue="${i.index}"><div class="suggestion-label ${i.category}"><span><i class="bullet"></i>${e(i.category==='spelling'?'Spelling':i.category==='ocr'?'OCR restoration':i.category==='grammar'?'Grammar':i.category==='punctuation'?'Punctuation':'Clarity & style')}</span><span title="${Math.round(i.confidence*100)}% rule confidence · ${e(i.source)}">${icon('info')}</span></div><div class="correction-preview"><del>${e(i.original||'∅').replace(/\n/g,' ↵ ')}</del>${i.replacements.length?`${icon('arrow')}<ins>${e(i.replacements[choices[i.id]||0]||'Remove').replace(/\n/g,' ↵ ')}</ins>`:''}</div><p>${e(i.message)}</p>${i.replacements.length>1?`<select class="select-plain" aria-label="Alternative correction for ${e(i.original)}" data-replacement-for="${e(i.id)}">${i.replacements.map((v,n)=>`<option value="${n}" ${(choices[i.id]||0)===n?'selected':''}>${e(v)}</option>`).join('')}</select>`:''}<div class="suggestion-actions">${i.replacements.length?`<button class="accept-button" data-action="accept" data-issue="${i.index}" ${checking?'disabled':''}>${icon('check')}Accept</button>`:`<span class="resource-status">Review manually</span>`}<div class="suggestion-options">${i.category==='spelling'?`<button class="icon-button" data-action="add-word" data-issue="${i.index}" title="Add to personal dictionary" aria-label="Add ${e(i.original)} to dictionary">${icon('book')}</button>`:''}<button class="ignore-button" data-action="ignore" data-issue="${i.index}">Ignore</button><button class="icon-button" data-action="disable-rule" data-issue="${i.index}" title="Disable this rule" aria-label="Disable this rule">${icon('close')}</button></div></div>${selectedId===i.id?`<div class="analysis-source">${e(i.source)} · ${Math.round(i.confidence*100)}% rule confidence</div>`:''}</article>`).join('')}${displayed.length>80?`<div class="more-results">Showing the first 80. Review these to reveal more suggestions.</div>`:''}${!displayed.length?`<div class="empty-state"><div class="empty-icon">${checking?'◌':'✧'}</div><h3>${checking?'Reading between the lines…':ctx.stale?'Ready when you are.':metrics.words?'A little room to breathe.':'Your next idea starts here.'}</h3><p>${checking?'Your text is being checked in a background worker.':ctx.stale?'Click “Check text” to review your latest edits.':metrics.words?'No suggestions in this category.<br>Keep writing. Keep being you.':'Start writing or import a document.<br>Suggestions will appear here.'}</p></div>`:''}${capped?'<div class="editor-warning">The first 3,000 suggestions are shown. Correct these and run another check.</div>':''}</div><div class="assistant-footer">${icon('feather')}Suggestions are a second perspective. The final word is yours.</div>`;
++  <div class="suggestions-list" id="suggestions-list">${readabilityStrip||''}${displayed.slice(0,80).map(i=>`<article class="suggestion ${selectedId===i.id?'selected':''}" data-select-issue="${i.index}"><div class="suggestion-label ${i.category}"><span><i class="bullet"></i>${e(i.category==='spelling'?'Spelling':i.category==='ocr'?'OCR restoration':i.category==='grammar'?'Grammar':i.category==='punctuation'?'Punctuation':'Clarity & style')}</span><span title="${Math.round(i.confidence*100)}% rule confidence · ${e(i.source)}">${icon('info')}</span></div><div class="correction-preview"><del>${e(i.original||'∅').replace(/\n/g,' ↵ ')}</del>${i.replacements.length?`${icon('arrow')}<ins>${e(i.replacements[choices[i.id]||0]||'Remove').replace(/\n/g,' ↵ ')}</ins>`:''}</div>${sentenceRows(text,i,choices[i.id]||0)}<p>${e(i.message)}</p>${i.replacements.length>1?`<select class="select-plain" aria-label="Alternative correction for ${e(i.original)}" data-replacement-for="${e(i.id)}">${i.replacements.map((v,n)=>`<option value="${n}" ${(choices[i.id]||0)===n?'selected':''}>${e(v)}</option>`).join('')}</select>`:''}<div class="suggestion-actions">${i.replacements.length?`<button class="accept-button" data-action="accept" data-issue="${i.index}" ${checking?'disabled':''}>${icon('check')}Accept</button>`:`<span class="resource-status">Review manually</span>`}<div class="suggestion-options">${i.category==='spelling'?`<button class="icon-button" data-action="add-word" data-issue="${i.index}" title="Add to personal dictionary" aria-label="Add ${e(i.original)} to dictionary">${icon('book')}</button>`:''}<button class="ignore-button" data-action="ignore" data-issue="${i.index}">Ignore</button><button class="icon-button" data-action="disable-rule" data-issue="${i.index}" title="Disable this rule" aria-label="Disable this rule">${icon('close')}</button></div></div>${selectedId===i.id?`<div class="analysis-source">${e(i.source)} · ${Math.round(i.confidence*100)}% rule confidence</div>`:''}</article>`).join('')}${displayed.length>80?`<div class="more-results">Showing the first 80. Review these to reveal more suggestions.</div>`:''}${!displayed.length?`<div class="empty-state"><div class="empty-icon">${checking?'◌':'✧'}</div><h3>${checking?'Reading between the lines…':ctx.stale?'Ready when you are.':metrics.words?'A little room to breathe.':'Your next idea starts here.'}</h3><p>${checking?'Your text is being checked in a background worker.':ctx.stale?'Click “Check text” to review your latest edits.':metrics.words?'No suggestions in this category.<br>Keep writing. Keep being you.':'Start writing or import a document.<br>Suggestions will appear here.'}</p></div>`:''}${capped?'<div class="editor-warning">The first 3,000 suggestions are shown. Correct these and run another check.</div>':''}</div><div class="assistant-footer">${icon('feather')}Suggestions are a second perspective. The final word is yours.</div>`;
+ }
+ export function documentsView(ctx){return heading('A home for your words.','Drafts, documents, and books. Pick up wherever you left off.','MY DOCUMENTS',btn('Import document','import','upload')+btn('New document','new','plus',true))+`<div class="document-toolbar"><input id="document-search" class="search-input" placeholder="Search your documents…" aria-label="Search documents"/><select id="document-sort" class="select-plain" aria-label="Sort documents"><option value="recent">Recently edited</option><option value="title">Title A–Z</option></select></div><div class="cards-grid" id="document-cards">${documentCards(ctx.docs)}</div><p class="view-note">Documents are saved in this browser. Export a copy or download a workspace backup to keep your work elsewhere.</p>`;}
+ export function documentCards(docs){return docs.map(d=>`<article class="document-card"><div class="document-card-top"><span class="resource-icon">${icon(d.chapters.length>1?'book':'file')}</span><span class="tag tag-neutral">${e((d.sourceType||'draft').toUpperCase())}</span></div><h3>${e(d.title)}</h3><p>${e(d.chapters.map(c=>c.text).join(' ').slice(0,200)||'A fresh page, ready for your next idea.')}</p><div class="document-card-footer"><span>${relativeDate(d.updatedAt)} · ${d.chapters.length} ${d.chapters.length===1?'section':'sections'}</span><div class="inline-actions"><button class="icon-button delete-document" data-action="delete-document" data-id="${e(d.id)}" aria-label="Delete ${e(d.title)}" title="Delete document">${icon('trash')}</button><button class="btn btn-sm btn-soft" data-action="open-document" data-id="${e(d.id)}">Open ${icon('arrow')}</button></div></div></article>`).join('')||'<div class="empty-state full-width"><div class="empty-icon">✧</div><h3>A fresh start.</h3><p>Create a draft or import your first document.</p></div>';}
+diff --git a/tests/sentence.test.mjs b/tests/sentence.test.mjs
+new file mode 100644
+index 0000000..6e99eb7
+--- /dev/null
++++ b/tests/sentence.test.mjs
+@@ -0,0 +1,106 @@
++import test from 'node:test';
++import assert from 'node:assert/strict';
++import {sentenceContext} from '../src/core/sentence.js';
++
++const issueAt=(text,needle,from=0)=>{const start=text.indexOf(needle,from);if(start<0)throw new Error('needle not found');return {id:'t',start,end:start+needle.length,original:needle,replacements:['X1','X2']};};
++
++test('sentence context returns the containing sentence and its correction',()=>{
++  const text='The sky was pale. She recieved the letter yesterday. Nobody spoke.';
++  const c=sentenceContext(text,issueAt(text,'recieved'),'received');
++  assert.equal(c.sentence,'She recieved the letter yesterday.');
++  assert.equal(c.corrected,'She received the letter yesterday.');
++  assert.deepEqual([c.from,c.to],[4,12]);
++  assert.equal(c.replaced,'received');
++  assert.ok(!c.startClipped&&!c.endClipped);
++});
++
++test('each alternative replacement produces its own corrected sentence',()=>{
++  const text='She recieved the letter.';
++  const issue=issueAt(text,'recieved');
++  assert.equal(sentenceContext(text,issue,'X1').corrected,'She X1 the letter.');
++  assert.equal(sentenceContext(text,issue,'X2').corrected,'She X2 the letter.');
++});
++
++test('the flagged range is marked inside the example sentence',()=>{
++  const text='A calm morning. The b00k lay open. Birds started up.';
++  const c=sentenceContext(text,issueAt(text,'b00k'),'book');
++  assert.equal(c.sentence.slice(c.from,c.to),'b00k');
++  assert.equal(c.corrected.slice(c.from,c.from+'book'.length),'book');
++  assert.equal(c.corrected.slice(c.from,c.from+'book'.length+1),'book ');
++});
++
++test('without a replacement only the example sentence is provided',()=>{
++  const text='He don’t know the answer. She does.';
++  const c=sentenceContext(text,{...issueAt(text,'don’t'),replacements:[]},null);
++  assert.equal(c.sentence,'He don’t know the answer.');
++  assert.equal(c.corrected,null);
++});
++
++test('the first replacement is the default choice',()=>{
++  const text='She recieved the letter.';
++  const c=sentenceContext(text,issueAt(text,'recieved'));
++  assert.equal(c.corrected,'She X1 the letter.');
++});
++
++test('line breaks and headings start their own sentence',()=>{
++  const text='# Chapter One\n\nShe have a book.\n\n- a list item';
++  const c=sentenceContext(text,issueAt(text,'have'),'has');
++  assert.equal(c.sentence,'She have a book.');
++  assert.equal(c.corrected,'She has a book.');
++});
++
++test('CJK sentences break after 。 without trailing whitespace',()=>{
++  const text='これは一つ目の文。これがふたつ目の文です。';
++  const c=sentenceContext(text,issueAt(text,'ふたつ目','12'),'二つ目');
++  assert.equal(c.sentence,'これがふたつ目の文です。');
++  assert.equal(c.corrected,'これが二つ目の文です。');
++});
++
++test('decimal numbers do not end a sentence',()=>{
++  const text='The price rose 3.14 percent and recieved attention. Then it fell.';
++  const c=sentenceContext(text,issueAt(text,'recieved'),'received');
++  assert.equal(c.sentence,'The price rose 3.14 percent and recieved attention.');
++});
++
++test('long documents mark the preview as clipped at the window edge',()=>{
++  const text='word '.repeat(300)+''+'recieved'+' '+'word '.repeat(300);
++  const c=sentenceContext(text,issueAt(text,'recieved'),'received');
++  assert.ok(c.startClipped&&c.endClipped);
++  assert.ok(c.sentence.startsWith('word'));
++  assert.equal(c.corrected,c.sentence.slice(0,c.from)+'received'+c.sentence.slice(c.to));
++});
++
++test('an issue at the very start and end of the text stays in bounds',()=>{
++  const start=sentenceContext('recieved books',issueAt('recieved books','recieved'),'received');
++  assert.equal(start.sentence,'recieved books');
++  assert.equal(start.from,0);
++  const end=sentenceContext('She wrote it',issueAt('She wrote it','it'),'them');
++  assert.equal(end.sentence,'She wrote it');
++  assert.equal(end.corrected,'She wrote them');
++});
++
++test('stale, inverted, or out-of-bounds ranges return no context',()=>{
++  const text='She recieved the letter.';
++  assert.equal(sentenceContext(text,{start:5,end:5,original:'',replacements:[]}),null);
++  assert.equal(sentenceContext(text,{start:9,end:3,original:'x',replacements:[]}),null);
++  assert.equal(sentenceContext(text,{start:-1,end:5,original:'x',replacements:[]}),null);
++  assert.equal(sentenceContext(text,{start:0,end:99,original:'x',replacements:[]}),null);
++  assert.equal(sentenceContext(null,{start:0,end:3,replacements:[]}),null);
++  assert.equal(sentenceContext(text,null),null);
++  assert.equal(sentenceContext('',{start:0,end:1,original:'x',replacements:[]}),null);
++});
++
++test('OCR line-break issues keep the flagged range intact in the example',()=>{
++  const text='A docu-\nment arrived.';
++  const issue={start:2,end:12,original:'docu-\nment',replacements:['document']};
++  const c=sentenceContext(text,issue,'document');
++  assert.equal(c.sentence.slice(c.from,c.to),'docu-\nment');
++  assert.equal(c.corrected,'A document arrived.');
++});
++
++test('remote (LanguageTool-style) issues with plain ranges work too',()=>{
++  const text='Teh quick brown fox jumps over the lazy dog. Later days.';
++  const c=sentenceContext(text,{start:0,end:3,original:'Teh',replacements:['The']},'The');
++  assert.equal(c.sentence,'Teh quick brown fox jumps over the lazy dog.');
++  assert.equal(c.corrected.slice(0,3),'The');
++});
+-- 
+2.47.3
+

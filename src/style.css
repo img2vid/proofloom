@@ -42,3 +42,13 @@
 .quickfix-footer{display:flex;gap:4px;flex-wrap:wrap;border-top:1px solid var(--border);padding-top:7px;margin-top:5px}
 .quickfix-action{border:0;background:transparent;color:var(--green);font-size:12px;padding:4px 7px;border-radius:6px}
 .quickfix-action:hover,.quickfix-action:focus-visible{background:var(--mint);outline:none}
+/* Example and corrected sentence previews in the assistant pane. */
+.sentence-examples{display:grid;gap:6px;margin:11px 0 2px}
+.sentence-row{display:flex;align-items:flex-start;gap:9px;background:#f7f9f0;border:1px solid #e7ecd7;border-radius:6px;padding:8px 10px}
+.sentence-row.corrected{background:#f1f6e7;border-color:#dbe5c8}
+.sentence-tag{flex-shrink:0;min-width:56px;margin-top:3px;font-size:8px;font-weight:600;letter-spacing:.5px;text-transform:uppercase;color:#98a184}
+.sentence-row.corrected .sentence-tag{color:#5f7d4c}
+.sentence-text{margin:0;font-family:Newsreader,Georgia,serif;font-size:14px;line-height:1.55;color:#48584a;overflow-wrap:anywhere}
+.sentence-text del{color:#ba8e78;text-decoration-color:#ba8e7866}
+.sentence-text ins{color:#617d50;text-decoration:none;background:#e3ecd2;border-radius:3px;padding:0 4px}
+.sentence-ellipsis{color:#b4bc9f;margin:0 2px}

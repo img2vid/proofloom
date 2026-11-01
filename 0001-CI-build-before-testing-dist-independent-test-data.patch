@@ -1,0 +1,60 @@
+From a8f5492b5ec4a47781dbcc10510e51ad0d0a34b5 Mon Sep 17 00:00:00 2001
+From: Proofloom <fix@proofloom.local>
+Date: Sat, 31 Oct 2026 19:57:35 +0000
+Subject: [PATCH 1/2] CI: build before testing, dist-independent test data
+
+- The Pages workflow ran npm test before npm run build, but the engine
+  suite reads dist/data artifacts; CI therefore failed on a clean
+  checkout. Build first, then test.
+- The frequency ranks now come from vendor/frequency/en_50k.txt, parsed
+  with the same filter as scripts/build.mjs, so the suite no longer
+  requires a prebuilt dist/.
+- The meta-counts test is skipped with a reason when dist/ has not been
+  built.
+---
+ .github/workflows/pages.yml | 2 +-
+ tests/engine.test.mjs       | 7 +++++--
+ 2 files changed, 6 insertions(+), 3 deletions(-)
+
+diff --git a/.github/workflows/pages.yml b/.github/workflows/pages.yml
+index 6489df4..34c3a62 100644
+--- a/.github/workflows/pages.yml
++++ b/.github/workflows/pages.yml
+@@ -24,8 +24,8 @@ jobs:
+           node-version: '24'
+           cache: npm
+       - run: npm ci
+-      - run: npm test
+       - run: npm run build
++      - run: npm test
+       - uses: actions/configure-pages@v5
+       - uses: actions/upload-pages-artifact@v3
+         with:
+diff --git a/tests/engine.test.mjs b/tests/engine.test.mjs
+index 0785352..f4d52fd 100644
+--- a/tests/engine.test.mjs
++++ b/tests/engine.test.mjs
+@@ -19,7 +19,10 @@ import {REGISTER, INCLUSIVE, PREPOSITIONS} from '../src/core/data/register-table
+ const upstream = JSON.parse(fs.readFileSync('node_modules/@cspell/dict-en-common-misspellings/dict/dict-en.json', 'utf8'));
+ const corrections = Object.fromEntries(upstream.dictionaryDefinitions.flatMap(d => [...d.suggestWords, ...d.flagWords]).map(s => s.split('->')).filter(s => s.length === 2).map(([a, b]) => [a.toLowerCase(), b.split(',').map(x => x.trim())]));
+ const contextModel = JSON.parse(fs.readFileSync('src/core/data/context-model.json', 'utf8'));
+-const frequency = new Map(JSON.parse(fs.readFileSync('dist/data/frequency.json', 'utf8')).words.map((w, i) => [w, i + 1]));
++// Frequency ranks come from the vendored OpenSubtitles list, parsed exactly
++// like scripts/build.mjs, so the suite runs without a prebuilt dist/.
++const frequencyWords = fs.readFileSync('vendor/frequency/en_50k.txt', 'utf8').split('\n').map(line => line.split(' ')[0].trim()).filter(w => /^[a-z][a-z'-]{0,30}$/.test(w));
++const frequency = new Map(frequencyWords.map((w, i) => [w, i + 1]));
+ 
+ function makeEngine(options = {}) {
+   const engine = new ProofEngine(en, corrections, {contextModel, frequency, ...options});
+@@ -226,7 +229,7 @@ test('metrics remain stable and finite', () => {
+   assert.ok(Number.isFinite(m.readability));
+ });
+ 
+-test('worker data files exist and agree with the meta counts', () => {
++test('worker data files exist and agree with the meta counts', {skip: !fs.existsSync('dist/data/meta.json') && 'requires npm run build (dist/ is not built)'}, () => {
+   const meta = JSON.parse(fs.readFileSync('dist/data/meta.json', 'utf8'));
+   assert.ok(meta.rules > 5000);
+   assert.ok(meta.algorithms >= 50);
+-- 
+2.47.3
+

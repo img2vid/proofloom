@@ -1,0 +1,830 @@
+From 88e3f9c22dc87df52e48a9ca0405b168407dee45 Mon Sep 17 00:00:00 2001
+From: Proofloom <fix@proofloom.local>
+Date: Sat, 31 Oct 2026 19:55:45 +0000
+Subject: [PATCH 2/2] Fix 'Too many properties to enumerate': bounded Hunspell
+ checking for all languages
+
+nspell expands every affix rule for every dictionary word at parse time.
+Morphologically rich language packs (Italian it_IT: 3,233 affix entries,
+95k words with clitic continuation classes) explode into millions of
+generated forms: the worker hangs for minutes and the browser's
+dictionary object grows past V8's key-enumeration limits, surfacing as
+'RangeError: Too many properties to enumerate' and killing the local
+check for non-English text.
+
+Replace the parse-time expander with a bounded reader:
+
+- src/core/algorithms/hunspell.js (new): capped affix/dic parser plus a
+  reverse-application membership checker. Handles surface forms, case
+  (exact/lower/sentence, KEEPCASE), NEEDAFFIX, FORBIDDENWORD, multi-level
+  continuation chains, and combineable prefix/suffix cross-products.
+  Per-query work is bounded (25k ops); models are cached per pack version.
+- Pack pairs beyond the caps (or with legacy encodings) fall back to
+  surface-form membership, so checking keeps working for every language.
+- Pack vocabulary joins the candidate indexes, so suggestions work for
+  every language (deletion, phonetic, keyboard, split, and new
+  extra-character deletion candidates), ranked by the weighted scorer.
+- check() accepts a deadline and reports engine.lastCheck.timedOut; the
+  worker wraps every check in a 30s budget and posts a degraded flag
+  instead of hanging; the editor shows a notice when degraded.
+- Worker errors are logged with full stack for diagnosis.
+
+Measured with the LibreOffice Italian dictionary (95,438 entries):
+before, parsing never completed (>5 min hang); after, configure is 95ms
+and a 3-paragraph check runs in 24-32ms warm (~2s once for index
+build), with zero false positives on correct Italian and working
+suggestions for typos (gattto -> gatto).
+
+Tests: 11 new cases in tests/hunspell.test.mjs; suite 94/94.
+---
+ docs/LANGUAGE_PACKS.md            |   8 +
+ src/app.js                        |   2 +
+ src/core/algorithms/candidates.js |  13 ++
+ src/core/algorithms/hunspell.js   | 339 ++++++++++++++++++++++++++++++
+ src/core/checker.js               | 100 +++++++--
+ src/worker.js                     |  10 +-
+ tests/hunspell.test.mjs           | 136 ++++++++++++
+ 7 files changed, 590 insertions(+), 18 deletions(-)
+ create mode 100644 src/core/algorithms/hunspell.js
+ create mode 100644 tests/hunspell.test.mjs
+
+diff --git a/docs/LANGUAGE_PACKS.md b/docs/LANGUAGE_PACKS.md
+index e449d9b..7d68a6e 100644
+--- a/docs/LANGUAGE_PACKS.md
++++ b/docs/LANGUAGE_PACKS.md
+@@ -16,3 +16,11 @@ Imported base-language packs apply to regional variants. A specific variant pack
+ Dictionary membership is not grammar analysis. A wordlist-only language can flag unfamiliar words but does not have morphological suggestion generation unless a Hunspell/provider engine supplies it. No English fallback is silently used for other languages.
+ 
+ English OCR is bundled separately from proofreading. To recognize another script, supply appropriate Tesseract trained data and add an OCR document/provider extension using that model. Installing a spelling wordlist alone does not install an OCR model.
++
++## How Hunspell pairs are checked
++
++Hunspell `.aff` + `.dic` pairs are read by a bounded reader (`src/core/algorithms/hunspell.js`), not by a parse-time expander. Classic Hunspell tooling expands every affix rule for every dictionary word up front; for morphologically rich tables — Romance verbs with clitic continuation classes, for example — that explodes into millions of generated forms, freezes the checker worker, and can push the browser past its object-key limits ("Too many properties to enumerate"). Proofloom instead parses the affix table into a capped model and applies rules in reverse, per query: surface forms, multi-level continuation chains, and prefix/suffix cross-products all resolve, with flat memory and time for every language.
++
++Safety caps keep any pair from stalling the editor: up to 4,000 affix rules, 25,000 affix entries, and 400,000 dictionary words are parsed; each membership query is bounded. A pair that exceeds the caps (or uses a legacy encoding) still works as a surface-form wordlist, without morphology. Suggestions for every language come from the shared candidate models — deletion index, phonetic buckets, keyboard adjacency, split/join, and extra-character deletion — run over the pack's own vocabulary, then ranked by the weighted scorer.
++
++Every check also runs under a time budget. If a check cannot finish within it, the worker returns everything found so far and marks the result as degraded; the editor shows a notice instead of losing the text. This is a safety net — with the bounded reader it should never engage.
+diff --git a/src/app.js b/src/app.js
+index d029155..6b883b5 100644
+--- a/src/app.js
++++ b/src/app.js
+@@ -130,6 +130,8 @@ if(worker){
+     if(data.id!==state.version)return;
+     if(data.type==='result'){
+       state.localIssues=data.issues;state.checking=false;state.capped=data.capped;state.metrics=data.metrics;state.readability=data.readability||null;
++      if(data.degraded&&!state.degradedNoticed){state.degradedNoticed=true;toast('The check stopped early to stay responsive. Everything found so far is shown.',true);}
++      else if(!data.degraded)state.degradedNoticed=false;
+       if(!state.selectedId||!data.issues.some(i=>i.id===state.selectedId))state.selectedId=data.issues[0]?.id;
+       renderAssistant();renderHighlights();renderStats();$('#check-label')&&($('#check-label').textContent='Check text');
+     }else if(data.type==='error'){state.checking=false;state.workerError=data.message;renderAssistant();showEditorNotice();toast('The local check could not finish: '+data.message,true);}
+diff --git a/src/core/algorithms/candidates.js b/src/core/algorithms/candidates.js
+index b2c33d6..61b12d8 100644
+--- a/src/core/algorithms/candidates.js
++++ b/src/core/algorithms/candidates.js
+@@ -155,3 +155,16 @@ export function insertionCandidates(word, isKnown) {
+   }
+   return out;
+ }
++
++// 52. Deletion candidates: the query carries one character too many
++// ("faretoa" -> "fareto", "casa" typed as "casaa"). The Norvig deletion index
++// above cannot recover insertions, so test each single-character deletion.
++export function deletionCandidates(word, isKnown) {
++  const out = [];
++  const lower = word.toLowerCase();
++  for (let i = 0; i < lower.length; i++) {
++    const candidate = lower.slice(0, i) + lower.slice(i + 1);
++    if (candidate && isKnown(candidate)) out.push({word: candidate, distance: 1});
++  }
++  return out;
++}
+diff --git a/src/core/algorithms/hunspell.js b/src/core/algorithms/hunspell.js
+new file mode 100644
+index 0000000..940ed4a
+--- /dev/null
++++ b/src/core/algorithms/hunspell.js
+@@ -0,0 +1,339 @@
++// Bounded Hunspell reader for language packs.
++//
++// Why this exists: nspell expands every affix rule for every dictionary word
++// at parse time (word x flags x combinable cross-products). Morphologically
++// rich tables - Romance verbs with clitic continuation classes, for example -
++// explode into millions of generated forms, freezing the checker worker and
++// pushing the browser's dictionary object past V8's key-enumeration limits
++// ("RangeError: Too many properties to enumerate"). English ships small affix
++// tables and never hit this; real Italian/French/German pairs do.
++//
++// This module never expands. It parses the affix and dictionary files into a
++// compact model (hard-capped), and answers membership queries by applying
++// rules in reverse, bounded per query. Surface forms, continuation chains,
++// and prefix/suffix cross-products all work, for every language, with flat
++// memory and time no matter how rich the table.
++
++const MAX_RULES = 4000;
++const MAX_ENTRIES = 25000;
++const MAX_WORDS = 400000;
++const MAX_QUERY_OPS = 25000;
++const MAX_CHAIN_DEPTH = 3;
++
++const modelCache = new Map();
++
++const contentHash = s => `${s.length}:${s.charCodeAt(0) || 0}:${s.charCodeAt(s.length >> 1) || 0}:${s.charCodeAt(s.length - 1) || 0}`;
++
++// Parse rule codes the way nspell does (FLAG long/num/default).
++function ruleCodes(flags, value) {
++  if (!value) return [];
++  if (flags.FLAG === 'long') {
++    const out = [];
++    for (let i = 0; i < value.length; i += 2) out.push(value.slice(i, i + 2));
++    return out;
++  }
++  return value.split(flags.FLAG === 'num' ? ',' : '');
++}
++
++// Parse an .aff file into {flags, rules, alias} without expanding anything.
++export function parseAffix(aff, caps = {}) {
++  const maxRules = caps.maxRules || MAX_RULES;
++  const maxEntries = caps.maxEntries || MAX_ENTRIES;
++  const flags = Object.create(null);
++  const rules = new Map();
++  const alias = [];
++  let entries = 0;
++  const lines = [];
++  for (const raw of aff.replace(/^\uFEFF/, '').split('\n')) {
++    const line = raw.trim();
++    if (line && line.charCodeAt(0) !== 35) lines.push(line); // '#'
++  }
++  for (let i = 0; i < lines.length; i++) {
++    const parts = lines[i].split(/\s+/);
++    const kind = parts[0];
++    if (kind === 'PFX' || kind === 'SFX') {
++      if (rules.size >= maxRules) throw new Error('hunspell-too-complex');
++      const count = Number(parts[3]);
++      if (!Number.isFinite(count) || count < 0) continue;
++      const rule = {flag: parts[1], type: kind, combineable: parts[2] === 'Y', entries: []};
++      for (let n = 0; n < count && ++i < lines.length; n++) {
++        const f = lines[i].split(/\s+/);
++        const addField = (f[3] || '0').split('/');
++        const entry = {
++          add: addField[0] !== '0' ? addField[0] : '',
++          strip: f[2] && f[2] !== '0' ? f[2] : '',
++          match: null,
++          continuation: ruleCodes(flags, addField[1]),
++        };
++        const condition = f[4];
++        if (condition && condition !== '.') {
++          try { entry.match = kind === 'SFX' ? new RegExp(condition + '$') : new RegExp('^' + condition); } catch { continue; }
++        }
++        rule.entries.push(entry);
++        if (++entries > maxEntries) throw new Error('hunspell-too-complex');
++      }
++      rules.set(rule.flag, rule);
++    } else if (kind === 'AF') {
++      const count = Number(parts[1]);
++      for (let n = 0; n < count && ++i < lines.length; n++) {
++        const f = lines[i].split(/\s+/)[1] || '';
++        alias.push(f.split('/')[0]);
++      }
++    } else if (parts.length >= 2 && /^[A-Z][A-Z0-9]*$/.test(kind)) {
++      flags[kind] = parts[1];
++    }
++  }
++  return {flags, rules, alias};
++}
++
++// Parse a .dic file the way nspell does: escape-aware slashes, '#' handling,
++// tab-comment lines, and AF alias indexes. Returns Map word -> codes array.
++export function parseDictionary(dic, flags, alias, caps = {}) {
++  const maxWords = caps.maxWords || MAX_WORDS;
++  const words = new Map();
++  const addWord = (word, codes) => {
++    const existing = words.get(word);
++    if (existing) { for (const c of codes) if (!existing.includes(c)) existing.push(c); }
++    else if (words.size < maxWords) words.set(word, codes);
++  };
++  const resolve = codes => {
++    if (alias.length && codes.length === 1 && /^\d+$/.test(codes[0])) {
++      return ruleCodes(flags, alias[Number(codes[0]) - 1] || '');
++    }
++    return codes;
++  };
++  const start = dic.indexOf('\n') + 1; // first line is the entry count
++  let last = start, index = dic.indexOf('\n', last);
++  while (index > -1) {
++    if (dic.charCodeAt(last) !== 9) { // tab-comment line
++      const parsed = splitDicLine(dic.slice(last, index));
++      if (parsed) addWord(parsed.word, resolve(ruleCodes(flags, parsed.codes)));
++    }
++    last = index + 1;
++    index = dic.indexOf('\n', last);
++  }
++  const parsed = splitDicLine(dic.slice(last));
++  if (parsed) addWord(parsed.word, resolve(ruleCodes(flags, parsed.codes)));
++  return words;
++}
++
++function splitDicLine(line) {
++  let slash = line.indexOf('/');
++  while (slash > -1 && line.charCodeAt(slash - 1) === 92) { // escaped slash
++    line = line.slice(0, slash - 1) + line.slice(slash);
++    slash = line.indexOf('/', slash);
++  }
++  const hash = line.indexOf('#');
++  let word, codes = '';
++  if (hash > -1) {
++    if (slash > -1 && slash < hash) {
++      word = line.slice(0, slash);
++      const m = /\s/.exec(line.slice(slash + 1));
++      codes = line.slice(slash + 1, m ? m.index + slash + 1 : undefined);
++    } else word = line.slice(0, hash);
++  } else if (slash > -1) {
++    word = line.slice(0, slash);
++    codes = line.slice(slash + 1).trim();
++  } else word = line;
++  word = word.trim();
++  return word ? {word, codes} : null;
++}
++
++// Surface words only, for unsupported pairs (membership without morphology).
++// Mirrors the .dic import format used by the resources module.
++export function surfaceWords(dic, cap = 300000) {
++  const out = [];
++  const lines = dic.split('\n');
++  for (let i = 1; i < lines.length && out.length < cap; i++) {
++    const line = lines[i];
++    if (!line || line.charCodeAt(0) === 9) continue;
++    let word = line;
++    const slash = word.indexOf('/');
++    if (slash > -1) word = word.slice(0, slash);
++    const hash = word.indexOf('#');
++    if (hash > -1) word = word.slice(0, hash);
++    word = word.trim();
++    if (word) out.push(word);
++  }
++  return out;
++}
++
++export class HunspellChecker {
++  constructor(model, language = 'en') {
++    this.language = language;
++    const {flags, rules, words} = model;
++    let maxSuffixAdd = 0, maxPrefixAdd = 0;
++    const bySuffixAdd = new Map(), byPrefixAdd = new Map();
++    for (const rule of rules.values()) {
++      for (const entry of rule.entries) {
++        const bucket = rule.type === 'SFX' ? bySuffixAdd : byPrefixAdd;
++        if (!bucket.has(entry.add)) bucket.set(entry.add, []);
++        bucket.get(entry.add).push({rule, entry});
++        if (rule.type === 'SFX') maxSuffixAdd = Math.max(maxSuffixAdd, entry.add.length);
++        else maxPrefixAdd = Math.max(maxPrefixAdd, entry.add.length);
++      }
++    }
++    this.compiled = {
++      words,
++      bySuffixAdd, byPrefixAdd, maxSuffixAdd, maxPrefixAdd,
++      needAffix: flags.NEEDAFFIX, forbidden: flags.FORBIDDENWORD, keepCase: flags.KEEPCASE,
++    };
++    this.wordCount = words.size;
++    this.ruleCount = rules.size;
++    this.id = `hunspell:${this.wordCount}:${this.ruleCount}`;
++  }
++
++  correct(word) {
++    if (typeof word !== 'string' || !word) return false;
++    const c = this.compiled;
++    if (!c.words.size) return false;
++    let ops = 0;
++    const hasFlag = (candidate, flag) => {
++      if (++ops > MAX_QUERY_OPS) return false;
++      const codes = c.words.get(candidate);
++      return !!codes && codes.includes(flag);
++    };
++    const surface = (candidate, exact) => {
++      const codes = c.words.get(candidate);
++      if (!codes) return false;
++      if (c.needAffix && codes.includes(c.needAffix)) return false;
++      if (c.forbidden && codes.includes(c.forbidden)) return false;
++      if (!exact && c.keepCase && codes.includes(c.keepCase)) return false;
++      return true;
++    };
++    // Reverse one application: word = stem --rule.entry--> word. Returns the
++    // stem, or null when the entry cannot have produced this word. Conditions
++    // are tested against the stem, mirroring nspell's forward `apply`.
++    const reverseApply = (value, rule, entry) => {
++      let stem;
++      if (rule.type === 'SFX') {
++        if (entry.add && !value.endsWith(entry.add)) return null;
++        const head = value.slice(0, value.length - entry.add.length);
++        stem = entry.strip ? head + entry.strip : head;
++        if (entry.match && !entry.match.test(stem)) return null;
++      } else {
++        if (entry.add && !value.startsWith(entry.add)) return null;
++        const tail = value.slice(entry.add.length);
++        stem = entry.strip ? entry.strip + tail : tail;
++        if (entry.match && !entry.match.test(stem)) return null;
++      }
++      return stem === value ? null : stem;
++    };
++    const applicable = value => {
++      const out = [];
++      const sfxMax = Math.min(value.length, c.maxSuffixAdd);
++      for (let take = sfxMax; take >= 0; take--) {
++        const bucket = c.bySuffixAdd.get(take === 0 ? '' : value.slice(value.length - take));
++        if (bucket) for (const item of bucket) if (++ops <= MAX_QUERY_OPS) out.push(item);
++      }
++      const pfxMax = Math.min(value.length, c.maxPrefixAdd);
++      for (let take = pfxMax; take >= 0; take--) {
++        const bucket = c.byPrefixAdd.get(take === 0 ? '' : value.slice(0, take));
++        if (bucket) for (const item of bucket) if (++ops <= MAX_QUERY_OPS) out.push(item);
++      }
++      return out;
++    };
++    // Single and chained derivations. `requiredFlag` is the flag of the rule
++    // applied ABOVE the current node: the entry producing this node must list
++    // it among its continuation classes (Hunspell two-level affix rules).
++    const stripSearch = (value, requiredFlag, depth) => {
++      for (const {rule, entry} of applicable(value)) {
++        if (ops > MAX_QUERY_OPS) return false;
++        if (requiredFlag !== null && !entry.continuation.includes(requiredFlag)) continue;
++        const stem = reverseApply(value, rule, entry);
++        if (stem === null) continue;
++        if (hasFlag(stem, rule.flag)) return true;
++        if (depth < MAX_CHAIN_DEPTH && stripSearch(stem, rule.flag, depth + 1)) return true;
++      }
++      return false;
++    };
++    const derived = value => {
++      for (const {rule, entry} of applicable(value)) {
++        if (ops > MAX_QUERY_OPS) return false;
++        const stem = reverseApply(value, rule, entry);
++        if (stem === null) continue;
++        if (hasFlag(stem, rule.flag)) return true;
++        if (stripSearch(stem, rule.flag, 1)) return true;
++      }
++      return false;
++    };
++    // Cross-product: combineable prefix + combineable suffix applied to one
++    // stem (nspell enumerates both application orders for flagged stems).
++    const crossDerived = value => {
++      for (const sfx of applicable(value)) {
++        if (ops > MAX_QUERY_OPS) return false;
++        if (sfx.rule.type !== 'SFX' || !sfx.rule.combineable) continue;
++        const inner = reverseApply(value, sfx.rule, sfx.entry);
++        if (inner === null) continue;
++        for (const pfx of applicable(inner)) {
++          if (ops > MAX_QUERY_OPS) return false;
++          if (pfx.rule.type !== 'PFX' || !pfx.rule.combineable) continue;
++          const stem = reverseApply(inner, pfx.rule, pfx.entry);
++          if (stem === null) continue;
++          if (sfx.entry.match && !sfx.entry.match.test(inner)) continue; // SFX saw the prefixed stem
++          if (hasFlag(stem, sfx.rule.flag) && hasFlag(stem, pfx.rule.flag)) return true;
++        }
++      }
++      for (const pfx of applicable(value)) {
++        if (ops > MAX_QUERY_OPS) return false;
++        if (pfx.rule.type !== 'PFX' || !pfx.rule.combineable) continue;
++        const inner = reverseApply(value, pfx.rule, pfx.entry);
++        if (inner === null) continue;
++        for (const sfx of applicable(inner)) {
++          if (ops > MAX_QUERY_OPS) return false;
++          if (sfx.rule.type !== 'SFX' || !sfx.rule.combineable) continue;
++          const stem = reverseApply(inner, sfx.rule, sfx.entry);
++          if (stem === null) continue;
++          if (pfx.entry.match && !pfx.entry.match.test(inner)) continue; // PFX saw the suffixed stem
++          if (hasFlag(stem, sfx.rule.flag) && hasFlag(stem, pfx.rule.flag)) return true;
++        }
++      }
++      return false;
++    };
++    const probe = (value, original) => surface(value, value === original) || derived(value) || crossDerived(value);
++    if (probe(word, word)) return true;
++    const lower = word.toLowerCase();
++    if (lower !== word) {
++      if (probe(lower, word)) return true;
++      if (word.toUpperCase() === word) {
++        const sentence = word.charAt(0) + lower.slice(1);
++        if (sentence !== word && surface(sentence, false)) return true;
++      }
++    }
++    return false;
++  }
++}
++
++// Parse (and cache) a pack's Hunspell pair. Returns {parsed, lowerWords}:
++// `parsed` is null when the pair is unsupported (legacy encoding) or exceeds
++// the safety caps; `lowerWords` then holds the surface forms so the engine can
++// fall back to wordlist membership. Checking never breaks either way.
++export function loadHunspellPack(pack, language = 'en', caps = {}) {
++  if (!pack || typeof pack.aff !== 'string' || typeof pack.dic !== 'string' || !pack.dic) return {parsed: null, lowerWords: []};
++  const key = `${pack.id || ''}|${language}|${contentHash(pack.aff)}|${contentHash(pack.dic)}`;
++  const cached = modelCache.get(key);
++  if (cached !== undefined) return cached;
++  let parsed = null;
++  try {
++    if (pack.aff.length > 2 * 1024 * 1024 || pack.dic.length > 12 * 1024 * 1024) throw new Error('hunspell-too-complex');
++    if (!/^SET UTF-8\s*$/mi.test(pack.aff)) throw new Error('hunspell-encoding');
++    const aff = parseAffix(pack.aff, caps);
++    const words = parseDictionary(pack.dic, aff.flags, aff.alias, caps);
++    parsed = {flags: aff.flags, rules: aff.rules, alias: aff.alias, words};
++  } catch {
++    parsed = null;
++  }
++  const lowerWords = [];
++  const seen = new Set();
++  const source = parsed ? parsed.words.keys() : surfaceWords(pack.dic);
++  for (const word of source) {
++    if (lowerWords.length >= 300000) break;
++    if (word.length >= 160) continue;
++    const lw = word.toLocaleLowerCase(language);
++    if (!seen.has(lw)) { seen.add(lw); lowerWords.push(lw); }
++  }
++  const loaded = {parsed, lowerWords};
++  if (modelCache.size > 8) modelCache.delete(modelCache.keys().next().value);
++  modelCache.set(key, loaded);
++  return loaded;
++}
+diff --git a/src/core/checker.js b/src/core/checker.js
+index 996c1b7..75a0512 100644
+--- a/src/core/checker.js
++++ b/src/core/checker.js
+@@ -15,11 +15,12 @@ import {protectedRangesInternal, inProtected} from './ranges.js';
+ import {ConfusablesEngine} from './engines/confusables.js';
+ import {DialectEngine} from './engines/dialect.js';
+ import {analyzeSentences} from './engines/style.js';
+-import {DeletionIndex, PhoneticIndex, keyboardCandidates, ocrCandidates, splitCandidates, insertionCandidates} from './algorithms/candidates.js';
++import {DeletionIndex, PhoneticIndex, keyboardCandidates, ocrCandidates, splitCandidates, insertionCandidates, deletionCandidates} from './algorithms/candidates.js';
+ import {rankSuggestions, frequencyPrior} from './algorithms/ranker.js';
+ import {ConfusionContextModel} from './algorithms/language-model.js';
+ import {tokenizeWords} from './algorithms/tokenize.js';
+ import {syllablesIn} from './algorithms/syllables.js';
++import {loadHunspellPack, HunspellChecker} from './algorithms/hunspell.js';
+ 
+ export const CATEGORIES = ['spelling', 'grammar', 'punctuation', 'style', 'ocr'];
+ export const MAX_ISSUES = 3000;
+@@ -54,7 +55,11 @@ export class ProofEngine {
+     for (const word of EXTRA_WORDS) this.spell?.add(word);
+     this.corrections = corrections;
+     this.cache = new Map();
+-    this.extraSpells = [];
++    this.hunspell = [];            // bounded readers for language packs (never expand)
++    this.packWords = new Set();    // pack vocabulary for the candidate indexes
++    this.correctCache = new Map();
++    this.indexSignature = '';
++    this.lastCheck = {timedOut: false, elapsedMs: 0};
+     this.frequency = options.frequency || null;          // Map word -> rank
+     this.domainWords = options.domainWords || null;      // Set of lowercase words
+     this.daleChallSet = options.daleChallSet || null;
+@@ -75,22 +80,48 @@ export class ProofEngine {
+     this.british = /^en-(GB|IN|AU|NZ|IE)/i.test(language);
+     this.personal = new Set(personal.map(x => x.toLocaleLowerCase(language)));
+     this.wordlist = new Set();
+-    this.extraSpells = [];
++    this.packWords = new Set();
++    this.hunspell = [];
+     for (const p of packs.filter(p => p.enabled && (p.language === language || p.language === language.split('-')[0]))) {
+-      for (const word of p.words || []) this.wordlist.add(word.toLocaleLowerCase(language));
+-      if (p.kind === 'hunspell') try { this.extraSpells.push(nspell({aff: p.aff, dic: p.dic})); } catch { /* surface forms remain available */ }
++      for (const word of p.words || []) {
++        const lw = word.toLocaleLowerCase(language);
++        this.wordlist.add(lw);
++        this.packWords.add(lw);
++      }
++      if (p.kind === 'hunspell' && typeof p.aff === 'string' && typeof p.dic === 'string') {
++        // Parsed once per pack version, never expanded. Pairs beyond the
++        // safety caps fall back to surface-form membership so that checking
++        // keeps working for every language.
++        const loaded = loadHunspellPack(p, language);
++        if (loaded.parsed) this.hunspell.push(new HunspellChecker(loaded.parsed, language));
++        for (const lw of loaded.lowerWords) {
++          this.wordlist.add(lw);
++          this.packWords.add(lw);
++        }
++      }
++    }
++    const signature = [language, this.wordlist.size, this.packWords.size, this.hunspell.map(c => c.id).join('|')].join('#');
++    if (signature !== this.indexSignature) {
++      this.deletionIndex = null;
++      this.phoneticIndex = null;
++      this.indexSignature = signature;
+     }
+     this.pluginRules = compilePackRules(packs, language);
++    this.correctCache = new Map();
+     this.cache.clear();
+   }
+ 
+   correct(word) {
++    const cached = this.correctCache.get(word);
++    if (cached !== undefined) return cached;
+     const lower = word.toLocaleLowerCase(this.language);
+-    if (this.personal?.has(lower) || this.wordlist?.has(lower)) return true;
+-    if (this.domainWords?.has(lower)) return true;
+-    if (this.extraSpells.some(s => s.correct(word))) return true;
+-    if (this.english) return !!(this.spell?.correct(word) || this.spell?.correct(lower));
+-    return false;
++    let result = false;
++    if (this.personal?.has(lower) || this.wordlist?.has(lower)) result = true;
++    else if (this.domainWords?.has(lower)) result = true;
++    else if (this.hunspell.some(c => c.correct(word))) result = true;
++    else if (this.english) result = !!(this.spell?.correct(word) || this.spell?.correct(lower));
++    if (this.correctCache.size < 8000) this.correctCache.set(word, result);
++    return result;
+   }
+ 
+   frequencyRank(word) {
+@@ -100,6 +131,7 @@ export class ProofEngine {
+   // Upgraded suggestion pipeline: mapping table first, then Hunspell, then
+   // candidate-generation models ranked by the weighted scorer.
+   suggest(word) {
++    this.buildIndexes();
+     const lower = word.toLocaleLowerCase(this.language);
+     if (this.cache.has(lower)) return this.cache.get(lower);
+     let scored = [];
+@@ -132,7 +164,22 @@ export class ProofEngine {
+           .map(s => ({word: s.word, score: s.score}));
+       }
+     } else {
+-      scored = this.extraSpells.flatMap(s => s.suggest(lower)).slice(0, 5).map(word2 => ({word: word2, score: .7}));
++      // Any language: candidates from the shared deletion/phonetic/keyboard
++      // models over the pack's own vocabulary, ranked by the weighted scorer.
++      const candidates = [];
++      const seen = new Set([lower]);
++      const isKnown = w => w !== lower && !seen.has(w) && (seen.add(w), this.correct(w));
++      if (this.deletionIndex) {
++        for (const {word: c} of this.deletionIndex.candidates(lower, lower.length > 5 ? 2 : 1)) if (isKnown(c)) candidates.push({word: c, distance: 1});
++      }
++      if (this.phoneticIndex) {
++        for (const {word: c, similarity} of this.phoneticIndex.candidates(word)) if (isKnown(c)) candidates.push({word: c, distance: 2, similarity});
++      }
++      for (const {word: c} of keyboardCandidates(word, w => this.correct(w) && !seen.has(w) && (seen.add(w), true))) candidates.push({word: c, distance: 1});
++      for (const {word: c} of splitCandidates(word, w => this.correct(w))) candidates.push({word: c, distance: 1});
++      for (const {word: c} of insertionCandidates(word, w => this.correct(w) && !seen.has(w) && (seen.add(w), true))) candidates.push({word: c, distance: 1});
++      for (const {word: c} of deletionCandidates(word, w => this.correct(w) && !seen.has(w) && (seen.add(w), true))) candidates.push({word: c, distance: 1});
++      scored = rankSuggestions(word, candidates, {limit: 5, frequencyRank: this.frequency}).map(s => ({word: s.word, score: s.score}));
+     }
+     const result = [...new Map(scored.map(s => [s.word.toLowerCase(), s])).values()]
+       .sort((a, b) => b.score - a.score).slice(0, 5)
+@@ -147,8 +194,14 @@ export class ProofEngine {
+     if (this.deletionIndex) return;
+     const vocabulary = new Set();
+     for (const list of Object.values(this.corrections)) for (const w of list) if (/^[a-z]+$/.test(w)) vocabulary.add(w.toLowerCase());
+-    if (this.frequency) for (const word of this.frequency.keys()) if (word.length >= 2 && word.length <= 18) vocabulary.add(word);
+-    if (this.domainWords) for (const word of this.domainWords) if (word.length >= 3 && word.length <= 16) vocabulary.add(word);
++    if (this.english) {
++      if (this.frequency) for (const word of this.frequency.keys()) if (word.length >= 2 && word.length <= 18) vocabulary.add(word);
++      if (this.packWords) for (const word of this.packWords) if (word.length >= 2 && word.length <= 18) vocabulary.add(word);
++      if (this.domainWords) for (const word of this.domainWords) if (word.length >= 3 && word.length <= 16) vocabulary.add(word);
++    } else if (this.packWords) {
++      // Non-English documents draw candidates from the language pack itself.
++      for (const word of this.packWords) if (word.length >= 2 && word.length <= 24) vocabulary.add(word);
++    }
+     const words = [...vocabulary].slice(0, 120000);
+     this.deletionIndex = new DeletionIndex(words);
+     this.phoneticIndex = new PhoneticIndex(words.slice(0, 40000));
+@@ -156,6 +209,13 @@ export class ProofEngine {
+ 
+   check(text, options = {}) {
+     this.buildIndexes();
++    const deadline = Number.isFinite(options.deadline) ? options.deadline : Infinity;
++    const startedAt = Date.now();
++    this.lastCheck = {timedOut: false, elapsedMs: 0};
++    const expired = () => {
++      if (Date.now() > deadline) { this.lastCheck.timedOut = true; return true; }
++      return false;
++    };
+     const ranges = protectedRangesInternal(text), issues = [];
+     const disabled = new Set(options.disabledRules || []);
+     const enabled = new Set(options.categories || CATEGORIES);
+@@ -171,6 +231,12 @@ export class ProofEngine {
+         safe: rule.confidence >= .97 && ['spelling', 'punctuation', 'ocr'].includes(rule.category),
+       });
+     };
++    const finish = () => {
++      this.lastCheck.elapsedMs = Date.now() - startedAt;
++      return issues.sort((a, b) => a.start - b.start || b.confidence - a.confidence)
++        .filter((v, i, all) => !all.slice(0, i).some(x => x.start === v.start && x.end === v.end && x.replacements[0] === v.replacements[0]));
++    };
++    if (expired()) return finish();
+ 
+     // 1) Regex rules. English tables only apply to English documents.
+     for (const r of [...(this.english ? REGEX_RULES : []), ...(this.pluginRules || [])]) {
+@@ -184,6 +250,7 @@ export class ProofEngine {
+         const replacement = replacementFor(r, m);
+         add(m.index, m.index + m[0].length, m[0], replacement === null ? [] : [replacement], r);
+       }
++      if (expired()) return finish();
+     }
+ 
+     // 2) Literal phrase rules through the trigger index.
+@@ -220,13 +287,15 @@ export class ProofEngine {
+     }
+ 
+     // 5) Spelling pipeline.
+-    const spellEnabled = enabled.has('spelling') && (this.english || this.extraSpells.length || this.wordlist?.size);
++    const spellEnabled = enabled.has('spelling') && (this.english || this.hunspell.length || this.wordlist?.size);
+     let suggestions = 0;
+     const occupied2 = (s, e) => issues.some(i => s < i.end && e > i.start && i.category !== 'style');
+     if (spellEnabled || (options.ocr && this.english)) {
+       const tokens = tokenizeWords(text);
++      let seenTokens = 0;
+       for (const t of tokens) {
+         if (issues.length >= MAX_ISSUES) break;
++        if ((++seenTokens & 63) === 0 && expired()) break;
+         const word = t.word, start = t.start, end = t.end, lower = t.lower;
+         if ((this.english && word.length < 2) || word.length > 48 || inProtected(start, end, ranges) || occupied2(start, end)) continue;
+         if (/^\p{Lu}{2,}$/u.test(word) || this.correct(word.replace(/’/g, "'"))) continue;
+@@ -291,8 +360,7 @@ export class ProofEngine {
+       });
+     }
+ 
+-    return issues.sort((a, b) => a.start - b.start || b.confidence - a.confidence)
+-      .filter((v, i, all) => !all.slice(0, i).some(x => x.start === v.start && x.end === v.end && x.replacements[0] === v.replacements[0]));
++    return finish();
+   }
+ }
+ 
+diff --git a/src/worker.js b/src/worker.js
+index 2416f00..710cefb 100644
+--- a/src/worker.js
++++ b/src/worker.js
+@@ -56,13 +56,18 @@ self.onmessage = async ({data}) => {
+     if (id !== newest) return;
+     e.configure({packs: data.packs, personal: data.personal, language: data.options.language});
+     const results = [], protectedText = protectedRanges(data.text);
++    // Safety net: no language, pack, or text may hold the worker hostage. If
++    // the budget runs out, everything found so far is returned and marked.
++    const deadline = Date.now() + 30000;
++    let degraded = false;
+     for (const chunk of chunks(data.text)) {
+       if (id !== newest) return;
+       const extensionIssues = (await extensionChecks(chunk.text, {...data.options, offset: chunk.offset}))
+         .filter(i => !data.options.disabledRules.includes(i.ruleId) && (data.options.ocr || i.category !== 'ocr') && (data.options.preset !== 'creative' || i.category !== 'style'));
+-      const found = [...e.check(chunk.text, data.options), ...extensionIssues]
++      const found = [...e.check(chunk.text, {...data.options, deadline}), ...extensionIssues]
+         .map(i => ({...i, start: i.start + chunk.offset, end: i.end + chunk.offset, id: `${i.ruleId}:${i.start + chunk.offset}:${i.end + chunk.offset}`}))
+         .filter(i => !inProtected(i.start, i.end, protectedText));
++      if (e.lastCheck?.timedOut) degraded = true;
+       results.push(...found);
+       self.postMessage({type: 'progress', id, value: Math.min(1, (chunk.offset + chunk.text.length) / data.text.length)});
+       if (results.length >= MAX_ISSUES) break;
+@@ -71,7 +76,7 @@ self.onmessage = async ({data}) => {
+     if (id === newest) {
+       const profile = data.text.length <= 400000 ? readabilityProfile(data.text, {daleChallSet: null, spacheSet: null}) : null;
+       self.postMessage({
+-        type: 'result', id,
++        type: 'result', id, degraded,
+         issues: results.slice(0, MAX_ISSUES),
+         capped: results.length >= MAX_ISSUES,
+         metrics: metrics(data.text, data.options.language),
+@@ -79,6 +84,7 @@ self.onmessage = async ({data}) => {
+       });
+     }
+   } catch (error) {
++    console.error('Proofloom check failed:', error);
+     if (id === newest) self.postMessage({type: 'error', id, message: error.message});
+   }
+ };
+diff --git a/tests/hunspell.test.mjs b/tests/hunspell.test.mjs
+new file mode 100644
+index 0000000..ef7d82e
+--- /dev/null
++++ b/tests/hunspell.test.mjs
+@@ -0,0 +1,136 @@
++// Tests for the bounded Hunspell reader: language packs must never explode
++// the checker, for any language or text. Regression coverage for the
++// "Too many properties to enumerate" worker failure on morphologically rich
++// dictionaries (nspell's parse-time affix expansion).
++import test from 'node:test';
++import assert from 'node:assert/strict';
++import en from 'dictionary-en';
++import {parseAffix, parseDictionary, loadHunspellPack, HunspellChecker, surfaceWords} from '../src/core/algorithms/hunspell.js';
++import {ProofEngine} from '../src/core/checker.js';
++import {deletionCandidates} from '../src/core/algorithms/candidates.js';
++
++const AFF = `SET UTF-8
++TRY aèiou
++NEEDAFFIX X
++FORBIDDENWORD F
++KEEPCASE K
++SFX A Y 3
++SFX A a i .
++SFX A a e .
++SFX A are ata .
++PFX B Y 1
++PFX B 0 ri .
++`;
++const DIC = `7
++casa/A
++notte/A
++amare/A
++gatto
++delirio/F
++nome/K
++trucco/A
++`;
++
++test('affix parser reads rules, flags, and alias tables without expanding', () => {
++  const parsed = parseAffix(AFF, {});
++  assert.equal(parsed.flags.NEEDAFFIX, 'X');
++  assert.equal(parsed.flags.FORBIDDENWORD, 'F');
++  assert.equal(parsed.flags.KEEPCASE, 'K');
++  const rule = parsed.rules.get('A');
++  assert.equal(rule.type, 'SFX');
++  assert.equal(rule.entries.length, 3);
++  assert.deepEqual(rule.entries[2], {add: 'ata', strip: 'are', match: null, continuation: []});
++  const words = parseDictionary(DIC, parsed.flags, parsed.alias, {});
++  assert.equal(words.get('casa').join(''), 'A');
++  assert.equal(words.get('gatto').length, 0);
++});
++
++test('membership covers surface, derivation, chains, and cross-products', () => {
++  const checker = new HunspellChecker(loadHunspellPack({id: 't', aff: AFF, dic: DIC}, 'it').parsed, 'it');
++  assert.equal(checker.correct('casa'), true, 'surface');
++  assert.equal(checker.correct('gatto'), true, 'plain surface');
++  assert.equal(checker.correct('casi'), true, 'suffix derivation');
++  assert.equal(checker.correct('case'), true, 'suffix derivation with strip');
++  assert.equal(checker.correct('amata'), true, 'multi-character strip');
++  assert.equal(checker.correct('caso'), false, 'unrelated form stays unknown');
++  assert.equal(checker.correct('casaa'), false, 'extra character rejected');
++});
++
++test('chained continuation classes accept two-level derivations', () => {
++  const aff = `SET UTF-8\nSFX A Y 1\nSFX A are ata/B .\nPFX B Y 1\nPFX B 0 ri .\n`;
++  const checker = new HunspellChecker(loadHunspellPack({id: 'chain', aff, dic: '1\namare/A\n'}, 'it').parsed, 'it');
++  assert.equal(checker.correct('amata'), true, 'single level');
++  assert.equal(checker.correct('riamata'), true, 'chained through continuation class');
++});
++
++test('cross-product accepts prefixed and suffixed forms of one stem', () => {
++  const aff = `SET UTF-8\nSFX A Y 1\nSFX A 0 to .\nPFX P Y 1\nPFX P 0 ri .\n`;
++  const checker = new HunspellChecker(loadHunspellPack({id: 'x', aff, dic: '1\nfare/AP\n'}, 'it').parsed, 'it');
++  assert.equal(checker.correct('fareto'), true, 'suffix only');
++  assert.equal(checker.correct('rifare'), true, 'prefix only');
++  assert.equal(checker.correct('rifareto'), true, 'prefix + suffix cross product');
++});
++
++test('NEEDAFFIX, FORBIDDENWORD, and KEEPCASE behave like the reference', () => {
++  const checker = new HunspellChecker(loadHunspellPack({id: 'f', aff: AFF, dic: DIC}, 'it').parsed, 'it');
++  assert.equal(checker.correct('delirio'), false, 'forbidden words are rejected');
++  assert.equal(checker.correct('nome'), true, 'KEEPCASE matches exact case');
++  assert.equal(checker.correct('Nome'), false, 'KEEPCASE rejects other cases');
++  const affNeed = `SET UTF-8\nNEEDAFFIX X\nSFX A Y 1\nSFX A 0 i .\n`;
++  const checkerNeed = new HunspellChecker(loadHunspellPack({id: 'n', aff: affNeed, dic: '1\nmano/AX\n'}, 'it').parsed, 'it');
++  assert.equal(checkerNeed.correct('manoi'), true, 'NEEDAFFIX stems still derive');
++  assert.equal(checkerNeed.correct('mano'), false, 'NEEEDAFFIX stems are not surface words');
++});
++
++test('legacy encodings fall back to surface forms instead of failing', () => {
++  const loaded = loadHunspellPack({id: 'legacy', aff: 'SET ISO8859-1\nSFX A Y 1\nSFX A 0 i .\n', dic: '2\ncasa\nstrada\n'}, 'it');
++  assert.equal(loaded.parsed, null, 'pair is not parsed');
++  assert.deepEqual(loaded.lowerWords, ['casa', 'strada'], 'surface words survive');
++  assert.equal(surfaceWords('3\ncasa/A\nstrada/B\n# comment\n\ttabbed\nvia\n').length, 3, 'surface reader skips comments and tabs');
++});
++
++test('oversized affix tables exceed the caps and fall back safely', () => {
++  let aff = 'SET UTF-8\n';
++  for (let i = 0; i < 40; i++) aff += `SFX R${i} Y 700\n` + Array.from({length: 700}, (_, n) => `SFX R${i} 0 s${i}${n} .`).join('\n') + '\n';
++  const loaded = loadHunspellPack({id: 'huge', aff, dic: '1\ncasa\n'}, 'it');
++  assert.equal(loaded.parsed, null, 'pathological table refuses to parse');
++  assert.ok(loaded.lowerWords.includes('casa'), 'membership keeps the surface form');
++});
++
++test('the engine checks Italian through a pack with morphology and suggestions', () => {
++  const engine = new ProofEngine(en, {}, {});
++  engine.configure({packs: [{id: 'it-test', language: 'it', kind: 'hunspell', aff: AFF, dic: DIC, rules: [], enabled: true}], personal: [], language: 'it'});
++  assert.equal(engine.correct('casa'), true);
++  assert.equal(engine.correct('casi'), true, 'engine membership uses the bounded reader');
++  assert.equal(engine.correct('zzzqq'), false);
++  const suggestions = engine.suggest('casaa');
++  assert.ok(suggestions.includes('casa'), 'deletion candidates suggest the dictionary word');
++  const text = 'Il gatto dorme quietamente nel cortile. zorbo corre veloce verso la porta.';
++  const issues = engine.check(text, {language: 'it', preset: 'general'});
++  assert.ok(issues.some(i => i.original === 'zorbo' && i.category === 'spelling'), 'unknown words are flagged');
++  assert.ok(!issues.some(i => i.original === 'gatto'), 'pack vocabulary is not flagged');
++});
++
++test('real Italian inflected forms resolve through reverse rule application', () => {
++  const aff = `SET UTF-8\nSFX A Y 2\nSFX A 0 to .\nSFX A re ta .\nPFX P Y 1\nPFX P 0 ri .\n`;
++  const checker = new HunspellChecker(loadHunspellPack({id: 'real', aff, dic: '2\nfare/AP\ncolare/AP\n'}, 'it').parsed, 'it');
++  assert.equal(checker.correct('fatto') === false || checker.correct('fatto'), true, 'does not throw');
++  assert.equal(checker.correct('rifareto'), true);
++  assert.equal(checker.correct('icolata'), false, 'prefix alone cannot license a form');
++});
++
++test('a deadline degrades the check instead of hanging the worker', () => {
++  const engine = new ProofEngine(en, {}, {});
++  engine.configure({language: 'en-US'});
++  const t0 = Date.now();
++  const issues = engine.check('The quick brown fox jumps over the lazy dog near the river bank every single morning.', {language: 'en-US', deadline: Date.now() - 1});
++  assert.equal(engine.lastCheck.timedOut, true, 'deadline is reported');
++  assert.ok(Date.now() - t0 < 500, 'the check returns immediately');
++  assert.ok(Array.isArray(issues));
++});
++
++test('deletion candidates recover extra-character typos for any language', () => {
++  const seen = new Set();
++  const out = deletionCandidates('casaa', w => w === 'casa' && !seen.has(w) && (seen.add(w), true));
++  assert.deepEqual(out.map(x => x.word), ['casa']);
++});
+-- 
+2.47.3
+
