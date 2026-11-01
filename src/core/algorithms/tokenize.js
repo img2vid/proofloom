@@ -1,9 +1,11 @@
 // Text segmentation algorithms: words, sentences, paragraphs with offsets.
 
-// 28. Word tokenization with UTF-16 offsets.
+// 28. Word tokenization with UTF-16 offsets. ZWJ/ZWNJ join conjuncts in
+// Indic scripts (Sinhala මනුෂ්‍ය, Marathi half forms), so they belong
+// inside a word instead of splitting it in two.
 export function tokenizeWords(text) {
   const out = [];
-  const pattern = /[\p{L}\p{M}][\p{L}\p{M}'’-]*/gu;
+  const pattern = /[\p{L}\p{M}][\p{L}\p{M}\u200C\u200D'’-]*/gu;
   for (const m of text.matchAll(pattern)) {
     const word = m[0];
     out.push({ word, lower: word.toLowerCase().replace(/[’]/g, "'"), start: m.index, end: m.index + word.length });

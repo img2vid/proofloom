@@ -485,13 +485,26 @@ $('#menu-button').onclick=()=>document.body.classList.toggle('nav-open');
 dialog.addEventListener('click',ev=>{if(ev.target===dialog){const r=dialog.getBoundingClientRect();if(ev.clientX<r.left||ev.clientX>r.right||ev.clientY<r.top||ev.clientY>r.bottom)dialog.close();}});
 window.addEventListener('hashchange',()=>{void flushSave();render();});window.addEventListener('resize',()=>{resizeEditor();closeQuickFix();});
 // Click-to-correct: a click in the editor that lands on a highlighted word
-// opens the correction popover for that issue.
+// opens the correction popover for that issue. Selecting text (drag,
+// double-click, shift-click) is never a correction request: a live
+// non-collapsed selection only closes the popover instead of opening one,
+// so the popover can no longer steal focus mid-selection and wipe out the
+// text the user just selected.
 document.addEventListener('click',event=>{
   if(state.route!=='editor'||dialog.open)return;
   const ta=event.target.closest('#editor');
   if(!ta)return;
+  if((ta.selectionEnd??0)>(ta.selectionStart??0)){closeQuickFix();return;}
   const issue=findIssueAtOffset(state.issues,ta.selectionStart??0);
   if(issue)openQuickFixFor(issue);else closeQuickFix();
+});
+// Selections made with the keyboard (or programmatically) close the popover
+// as well, so a correction card never sits between the user and the text
+// they are selecting.
+document.addEventListener('selectionchange',event=>{
+  if(state.route!=='editor'||!quickFixOpen())return;
+  const ta=event.target;
+  if(ta&&ta.id==='editor'&&(ta.selectionEnd??0)>(ta.selectionStart??0))closeQuickFix();
 });
 window.addEventListener('beforeunload',event=>{if(!state.storage){event.preventDefault();event.returnValue='';}});
 document.addEventListener('visibilitychange',()=>{if(document.hidden)void flushSave();});

@@ -52,7 +52,7 @@ async function loadFrequency(variant) {
   try {
     const parsed = JSON.parse(await loadGzipped(`./data/frequency/${variant}.json.gz`));
     const map = new Map();
-    if (Array.isArray(parsed.words)) for (const [index, word] of parsed.words.entries()) map.set(String(word).toLowerCase(), index + 1);
+    if (Array.isArray(parsed.words)) for (const [index, word] of parsed.words.entries()) map.set(String(word).toLowerCase().normalize('NFC'), index + 1);
     return map.size ? map : null;
   } catch { return null; }
 }

@@ -15,6 +15,7 @@ import ko from 'dictionary-ko';
 import {ProofEngine} from '../src/core/checker.js';
 import {Morphology} from '../src/core/morphology.js';
 import {LazyHunspell} from '../src/core/lazy-hunspell.js';
+import {tokenizeWords} from '../src/core/algorithms/tokenize.js';
 
 const known = words => {
   const set = new Set(words);
@@ -41,6 +42,11 @@ test('languages without a curated table fall back to their script', () => {
   assert.ok(unknown.specsFor('الكتاب').length, 'arabic fallback applies');
   assert.ok(unknown.specsFor('사랑은').length, 'hangul fallback applies');
   assert.ok(unknown.specsFor('चलता').length, 'devanagari fallback applies');
+  assert.ok(unknown.specsFor('মানুষের')[0].suffixes.includes('ের'), 'bengali fallback applies');
+  assert.ok(unknown.specsFor('மரங்கள்')[0].suffixes.includes('கள்'), 'tamil fallback applies');
+  assert.ok(unknown.specsFor('ਪੁਸਤਕਾਂ')[0].suffixes.includes('ਾਂ'), 'gurmukhi fallback applies');
+  assert.ok(unknown.specsFor('పుస్తకాలు')[0].suffixes.includes('ాలు'), 'telugu fallback applies');
+  assert.ok(unknown.specsFor('വീട്ടിൽ')[0].suffixes.includes('ിൽ'), 'malayalam fallback applies');
 });
 
 test('every bundled language code resolves to an active spec', () => {
@@ -105,6 +111,34 @@ test('agglutinative and fusional languages resolve chains to their roots', () =>
   assert.deepEqual(Morphology.forLanguage('nl').roots('huizen', known(['huis'])), ['huis']);
 });
 
+test('Bengali declensions and conjugations resolve to their roots', () => {
+  const morph = Morphology.forLanguage('bn-BD');
+  const roots = (word, dict) => morph.roots(word, known(dict));
+  // Nominal case + classifier chains.
+  assert.deepEqual(roots('মানুষের', ['মানুষ']), ['মানুষ'], 'genitive ের chains through মানুষে to the root');
+  assert.deepEqual(roots('বইয়ের', ['বই']), ['বই'], 'vowel stems insert য় before ের');
+  assert.deepEqual(roots('শহরে', ['শহর']), ['শহর'], 'locative ে');
+  assert.deepEqual(roots('বইগুলো', ['বই']), ['বই'], 'classifier গুলো');
+  assert.deepEqual(roots('ছেলেদের', ['ছেলে']), ['ছেলে'], 'animate plural দের');
+  assert.deepEqual(roots('মানুষটির', ['মানুষ']), ['মানুষ'], 'classifier টির');
+  // Verbal endings.
+  assert.deepEqual(roots('করছি', ['কর']), ['কর'], 'present progressive ছি');
+  assert.deepEqual(roots('দেখেছিলাম', ['দেখ']), ['দেখ'], 'past perfect েছিলাম');
+  assert.deepEqual(roots('দেখবে', ['দেখ']), ['দেখ'], 'future বে');
+  assert.deepEqual(roots('যাচ্ছি', ['যা']), ['যা'], 'progressive of vowel stems');
+  // Assamese shares the Bengali table.
+  assert.equal(Morphology.forLanguage('as-IN').primary, Morphology.forLanguage('bn').primary);
+});
+
+test('Bengali typos that only look like inflections stay flagged', () => {
+  const morph = Morphology.forLanguage('bn-BD');
+  const roots = (word, dict) => morph.roots(word, known(dict));
+  assert.deepEqual(roots('মানুসের', ['মানুষ']), [], 'wrong conjunct স for ষ stays a typo');
+  assert.deepEqual(roots('করক্স', ['কর']), [], 'garbage ending stays a typo');
+  assert.deepEqual(roots('বইয়েরর', ['বই']), [], 'doubled suffix boundary stays a typo');
+  assert.deepEqual(roots('করলামলামx', ['কর']), [], 'stacked endings with junk stay a typo');
+});
+
 // --- Engine integration: wordlist-only dictionaries ---
 
 const wordEngine = (language, words) => {
@@ -147,15 +181,55 @@ test('wordlist-only dictionaries accept inflected forms across languages', () =>
 
   const hu = wordEngine('hu', ['ház']);
   assert.equal(hu.correct('házakban'), true);
+
+  // Bengali through the engine, including decomposed IME input: some
+  // keyboards emit য় as য + nukta and ো as ে + া, which must not turn
+  // real words into spelling errors.
+  const bn = wordEngine('bn-BD', ['মানুষ', 'বই', 'কর', 'দেখ', 'ছেলে', 'শহর']);
+  for (const word of ['মানুষের', 'বইয়ের', 'করছি', 'দেখেছিলাম', 'ছেলেদেরকে', 'শহরে', 'বইগুলোতে']) assert.equal(bn.correct(word), true, word);
+  for (const word of ['মানুসের', 'করক্স', 'বইয়েরর']) assert.equal(bn.correct(word), false, word);
+  assert.equal(bn.correct('বইয়ের'.normalize('NFD')), true, 'decomposed য় still accepted');
+  assert.equal(bn.correct('মানুষের'.normalize('NFD')), true, 'decomposed ে/র still accepted');
+  // A personal word typed in decomposed form matches its canonical spelling.
+  const nfdPersonal = new ProofEngine(null, {}, {});
+  nfdPersonal.configure({packs: [], personal: ['বইয়ের'.normalize('NFD')], language: 'bn-BD'});
+  assert.equal(nfdPersonal.correct('বইয়ের'), true, 'personal entries are normalized');
 });
 
-test('unknown inflected words fall back to root-form suggestions', () => {
+test('corpus frequency vouches for roots the wordlists miss', () => {
+  const bn = new ProofEngine(null, {}, {frequency: new Map([['কর', 12], ['দেখ', 40]])});
+  bn.configure({language: 'bn-BD'});
+  assert.equal(bn.correct('করছি'), true, 'common root from the frequency list is a valid stem');
+  assert.equal(bn.correct('দেখবেন'), true);
+  assert.equal(bn.correct('করক্স'), false);
+
+  // English keeps its stacked-typo gates: the frequency list alone must not
+  // legitimize "walkeded" through the real word "walked".
+  const en = new ProofEngine(null, {}, {frequency: new Map([['walked', 9]])});
+  en.configure({language: 'en-US'});
+  assert.equal(en.correct('walkeded'), false);
+  assert.equal(en.correct('walkseded'), false);
+});
+
+test('suggestions lead with the main root form', () => {
+  const bn = wordEngine('bn-BD', ['মানুষ', 'বই']);
+  const forStack = bn.suggest('মানুষেরটা');
+  assert.ok(forStack.includes('মানুষ'), 'root form is suggested');
+  const direct = bn.suggest('মানুষের');
+  assert.equal(direct[0], 'মানুষ', 'the main root comes first, before inflected intermediates');
+
   const tr = wordEngine('tr', ['ev', 'kitap']);
   assert.ok(tr.suggest('evlerimdeki').includes('ev'), 'root form is suggested');
   assert.deepEqual(tr.suggest('evxler'), [], 'non-inflectional typos get no root suggestion');
 
   const ko = wordEngine('ko', ['사랑']);
   assert.ok(ko.suggest('사랑은의').includes('사랑'), 'root form is suggested');
+});
+
+test('ZWJ and ZWNJ stay inside Indic words', () => {
+  const tokens = tokenizeWords('\u0DB8\u0DB1\u0DD4\u0DC2\u0DCA\u200D\u0DBA\u0DBA\u0DCF \u0DC1\u0DD4\u0DB1\u0DCA\u200D\u0DBA\u0DBA\u0DD2').map(t => t.word);
+  assert.deepEqual(tokens, ['\u0DB8\u0DB1\u0DD4\u0DC2\u0DCA\u200D\u0DBA\u0DBA\u0DCF', '\u0DC1\u0DD4\u0DB1\u0DCA\u200D\u0DBA\u0DBA\u0DD2'], 'Sinhala conjuncts with ZWJ are single tokens');
+  assert.equal(tokenizeWords('कार्य\u200Cक्षमता').length, 1, 'Devanagari half form with ZWNJ is one token');
 });
 
 // --- Engine integration: bundled dictionaries ---

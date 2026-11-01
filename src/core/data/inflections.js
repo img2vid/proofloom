@@ -20,7 +20,9 @@
 //
 // Every bundled language resolves to a curated spec, an alias onto a close
 // relative, or a script fallback (_latin, _cyrillic, _arabic, _devanagari,
-// _hangul, _greek, _hebrew, _georgian), so the mechanism covers all of them.
+// _bengali, _gurmukhi, _gujarati, _oriya, _tamil, _telugu, _kannada,
+// _malayalam, _sinhala, _hangul, _greek, _hebrew, _georgian), so the
+// mechanism covers all of them.
 
 const cyrillicGuards = ['и', 'в', 'не', 'на', 'что', 'это', 'как', 'а', 'но', 'по', 'из', 'у', 'за', 'то', 'же', 'бы', 'от', 'до', 'для', 'при', 'над', 'под', 'или', 'если', 'уже', 'еще', 'ещё', 'там', 'тут', 'очень'];
 
@@ -67,8 +69,101 @@ const ARABIC_SPEC = {
 const DEVANAGARI_SPEC = {
   minStem: 2,
   maxDepth: 2,
-  suffixes: ['रहा', 'रही', 'रहे', 'गया', 'गयी', 'गये', 'गा', 'गे', 'गी', 'ता', 'ते', 'ती', 'ना', 'ने', 'नी', 'या', 'ए', 'ओ', 'इयाँ', 'इयों', 'कर', 'त'],
+  suffixes: ['रहा', 'रही', 'रहे', 'गया', 'गयी', 'गये', 'गा', 'गे', 'गी', 'ता', 'ते', 'ती', 'ना', 'ने', 'नी', 'या', 'ए', 'ओ', 'ओं', 'ें', 'ों', 'इयाँ', 'इयों', 'वाला', 'वाले', 'वाली', 'कर', 'त'],
+  // Oblique/vocalized stems drop the final ा (लड़का -> लड़के, लड़कें).
+  swaps: [['ें', 'ा'], ['ों', 'ा'], ['ो', 'ा'], ['े', 'ा']],
   guards: ['और', 'का', 'की', 'के', 'को', 'में', 'से', 'पर', 'यह', 'वह', 'है', 'हैं', 'था', 'थी', 'नहीं', 'भी', 'कि', 'जो', 'तो', 'ही', 'एक', 'इस', 'उस', 'मैं', 'हम', 'आप', 'क्या'],
+};
+
+// Brahmic-script tables. Each curated spec doubles as the fallback for its
+// script, so imported packs in neighbouring languages (Assamese via the bn
+// alias, Maithili, Konkani, Bhojpuri, Malayalam, ...) get real morphology
+// instead of nothing.
+const BENGALI_SPEC = {
+  minStem: 2,
+  maxDepth: 3,
+  suffixes: [
+    // Plural/classifier stacks with their own case endings.
+    'গুলোতেই', 'গুলোতে', 'গুলোকে', 'গুলোর', 'গুলোয়', 'গুলোই', 'গুলো',
+    'গুলিতে', 'গুলিকে', 'গুলির', 'গুলিয়', 'গুলি',
+    'খানাতে', 'খানায়', 'খানার', 'খানা', 'খানি',
+    'টাকেই', 'টাকে', 'টাতে', 'টায়', 'টার', 'টা', 'টিতেই', 'টিতে', 'টির', 'টি',
+    'দেরকে', 'দের', 'রা',
+    // Verb chains: perfect/progressive/past/future/person endings.
+    'েছিলাম', 'েছিলেন', 'েছিলে', 'েছিল', 'েছেন', 'েছি', 'েছে', 'েছ',
+    'চ্ছিলাম', 'চ্ছিলেন', 'চ্ছিলে', 'চ্ছিল', 'চ্ছেন', 'চ্ছি', 'চ্ছে', 'চ্ছ',
+    'ছিলাম', 'ছিলেন', 'ছিলে', 'ছিল', 'ছেন', 'ছি', 'ছে', 'ছ',
+    'লাম', 'লেন', 'লে', 'ল', 'বেন', 'বে', 'বো', 'ব', 'ুন', 'েন', 'িয়ে',
+    // Case endings: ablative/instrumental/manner, locative, accusative,
+    // genitive (with the য়-inserted vowel-stem forms), emphatics.
+    'দ্বারা', 'থেকে', 'হতে', 'দিয়ে', 'ভাবে', 'বারে',
+    'তে', 'কে', 'য়ের', 'ের', 'য়ে', 'য়', 'ার', 'ো', 'ও', 'ই', 'ি', 'ে', 'র',
+  ],
+  guards: ['এবং', 'অথবা', 'অথচ', 'কিন্তু', 'কিংবা', 'এই', 'সেই', 'ওই', 'যে', 'কি', 'কী', 'না', 'হ্যাঁ', 'তো', 'আর', 'বা', 'যদি', 'তাহলে', 'তবে', 'যেহেতু', 'কারণ', 'এখন', 'তখন', 'সব', 'কিছু', 'কেউ', 'কোনো', 'কোন', 'খুব', 'অনেক', 'আমি', 'আমরা', 'আমার', 'আমাকে', 'তুমি', 'তোমরা', 'তোমার', 'আপনি', 'সে', 'তার', 'তাকে', 'তাহার', 'তারা', 'তাদের', 'এটা', 'ওটা', 'এটি', 'ওটি', 'এরা', 'ওরা', 'এগুলো', 'ওগুলো', 'ইত্যাদি', 'হয়', 'এখানে', 'ওখানে', 'যেখানে', 'কোথায়', 'কেন', 'কখন', 'কীভাবে'],
+};
+
+const GURMUKHI_SPEC = {
+  minStem: 2,
+  maxDepth: 2,
+  suffixes: ['ਿਆਂ', 'ਵਾਲਾ', 'ਵਾਲੀ', 'ਵਾਲੇ', 'ਨੂੰ', 'ਤੋਂ', 'ਵਿੱਚ', 'ਨਾਲ', 'ਾਂ', 'ਨੇ', 'ਦਾ', 'ਦੀ', 'ਦੇ', 'ਕੇ', 'ਗਿਆ', 'ਦਿੱਤਾ', 'ਹੈ', 'ਹਨ', 'ਸੀ'],
+  guards: ['ਅਤੇ', 'ਜਾਂ', 'ਹੈ', 'ਹਨ', 'ਸੀ', 'ਨਹੀਂ', 'ਵੀ', 'ਕਿ', 'ਇਹ', 'ਉਹ', 'ਮੈਂ', 'ਅਸੀਂ', 'ਤੁਸੀਂ', 'ਕੀ', 'ਕਿਉਂ', 'ਕਿੱਥੇ'],
+};
+
+const GUJARATI_SPEC = {
+  minStem: 2,
+  maxDepth: 2,
+  // The plural marker is the vowel SIGN ો, not the independent letter ઓ.
+  suffixes: ['વાળા', 'ોને', 'ોમાં', 'નું', 'નો', 'ની', 'ના', 'ને', 'માં', 'થી', 'એ', 'ો', 'તા', 'તી', 'તું'],
+  guards: ['અને', 'છે', 'હતું', 'નથી', 'પણ', 'કે', 'આ', 'એ', 'હું', 'અમે', 'તમે', 'શું', 'કેમ', 'ક્યાં'],
+};
+
+const KANNADA_SPEC = {
+  minStem: 2,
+  maxDepth: 2,
+  suffixes: ['ಗಳನ್ನು', 'ಗಳಿಂದ', 'ಗಳಿಗೆ', 'ಯಲ್ಲಿ', 'ಯಿಂದ', 'ಯನ್ನು', 'ದಲ್ಲಿ', 'ದಿಂದ', 'ಅನ್ನು', 'ಗಳು', 'ಗೆ', 'ಗಳ', 'ನ', 'ದ', 'ಯ'],
+  guards: ['ಮತ್ತು', 'ಅಥವಾ', 'ಇದು', 'ಅದು', 'ಇಲ್ಲ', 'ಆದರೆ', 'ನಾನು', 'ನಾವು', 'ನೀವು', 'ಏನು', 'ಯಾಕೆ', 'ಎಲ್ಲಿ'],
+};
+
+const TAMIL_SPEC = {
+  minStem: 2,
+  maxDepth: 2,
+  // மரம்-type stems surface as மரத்தை/மரத்தில்: the doubled த் forms swap
+  // back to the citation -ம் ending as well as stripping.
+  suffixes: ['களுக்கு', 'களுடன்', 'களால்', 'களின்', 'களில்', 'களை', 'உடன்', 'ுடைய', 'ுக்கு', 'ால்', 'க்கு', 'கள்', 'இல்', 'ன்', 'ல்', 'து', 'ஐ'],
+  // ம்-final stems assimilate before க/த (மரம் -> மரங்கள், மரத்தை), so
+  // the nasal and doubled-த் endings swap back to the citation form.
+  swaps: [['ங்கள்', 'ம்'], ['கள்', 'ம்'], ['த்தை', 'ம்'], ['த்தில்', 'ம்'], ['த்துடன்', 'ம்'], ['த்தால்', 'ம்'], ['த்தின்', 'ம்'], ['த்துக்கு', 'ம்'], ['த்', 'ம்']],
+  guards: ['மற்றும்', 'அல்லது', 'இது', 'அது', 'இல்லை', 'ஆனால்', 'நான்', 'நாம்', 'நீங்கள்', 'என்ன', 'ஏன்', 'எங்கே'],
+};
+
+const TELUGU_SPEC = {
+  minStem: 2,
+  maxDepth: 2,
+  suffixes: ['యొక్క', 'నుండి', 'కోసం', 'తో', 'లను', 'ాలు', 'ాని', 'లో', 'కు', 'కి', 'లు', 'ను', 'ని'],
+  // ఇల్లు -> ఇళ్లు: the plural retroflexes and doubles the ల.
+  swaps: [['ాలు', 'ం'], ['ాని', 'ం'], ['ళ్లు', 'ల్లు']],
+  guards: ['మరియు', 'లేదా', 'ఇది', 'అది', 'లేదు', 'కానీ', 'నేను', 'మేము', 'మీరు', 'ఏమి', 'ఎందుకు', 'ఎక్కడ'],
+};
+
+const ODIA_SPEC = {
+  minStem: 2,
+  maxDepth: 2,
+  suffixes: ['ମାନଙ୍କ', 'ଗୁଡ଼ିକ', 'ମାନେ', 'ପାଇଁ', 'ଟିକୁ', 'ଟିର', 'ରେ', 'ରୁ', 'କୁ', 'ଟା', 'ର', 'ଟି'],
+  guards: ['ଏବଂ', 'ବା', 'ଏହା', 'ସେଇ', 'ନାହିଁ', 'କିନ୍ତୁ', 'ମୁଁ', 'ଆମେ', 'ତୁମେ', 'କଣ', 'କାହିଁକି', 'କେଉଁଠି'],
+};
+
+const SINHALA_SPEC = {
+  minStem: 2,
+  maxDepth: 2,
+  suffixes: ['වලින්', 'වලට', 'වල', 'ාගේ', 'ලා', 'ගේ', 'ින්', 'ෙන්', 'න්න', 'නවා', 'ට', 'මි', 'හි', 'ති'],
+  guards: ['සහ', 'නැත', 'මෙය', 'ඒ', 'මම', 'අපි', 'ඔබ', 'කුමක්ද', 'ඇයි'],
+};
+
+const MALAYALAM_SPEC = {
+  minStem: 2,
+  maxDepth: 2,
+  suffixes: ['ക്കളിൽ', 'ക്കളുടെ', 'ക്കളെ', 'ക്കൾ', 'കളിൽ', 'കളുടെ', 'കളെ', 'ത്തിന്റെ', 'ത്തിൽ', 'ത്തെ', 'യിൽ', 'യുടെ', 'യെ', 'ുടെ', 'ിൽ', 'ന്റെ', 'ൻ', 'ൾ', 'ർ', 'ം'],
+  guards: ['ഒപ്പം', 'അല്ലെങ്കിൽ', 'ഇത്', 'അത്', 'അല്ല', 'പക്ഷേ', 'ഞാൻ', 'നമ്മൾ', 'നിങ്ങൾ', 'എന്ത്', 'എന്തുകൊണ്ട്', 'എവിടെ'],
 };
 
 const HANGUL_SPEC = {
@@ -315,18 +410,23 @@ export const INFLECTION_SPECS = {
   },
   he: HEBREW_SPEC,
 
-  // Indic
+  // Indic. Bengali gets the fullest table: Bangla attaches case markers
+  // (কে, তে, ের/য়ের, ে/য়), classifiers (টা/টি, খানা, গুলো/গুলি), plural
+  // markers (রা, দের) and person/tense verb endings (ছি/চ্ছি, েছি, লাম,
+  // বে, ি, েন, ুন, ো) directly to the stem, and vowel-final stems insert
+  // য় before vowel-initial endings (বই -> বইয়ের), so those endings exist
+  // both bare and after য়.
   hi: DEVANAGARI_SPEC,
   mr: {
     minStem: 2,
     maxDepth: 2,
-    suffixes: ['त्या', 'मध्ये', 'ला', 'चा', 'ची', 'चे', 'ने', 'शी', 'ता', 'ते', 'ती', 'ना', 'ने', 'त', 'या'],
+    suffixes: ['त्या', 'मध्ये', 'च्या', 'ला', 'चा', 'ची', 'चे', 'ने', 'शी', 'ता', 'ते', 'ती', 'ना', 'ने', 'त', 'या', 'ओं', 'े'],
     guards: ['आणि', 'का', 'की', 'के', 'को', 'मध्ये', 'से', 'पर', 'हा', 'ही', 'हे', 'आहे', 'नाही', 'पण', 'तो', 'ती', 'मी', 'आम्ही', 'तुम्ही', 'काय', 'का'],
   },
   ne: {
     minStem: 2,
     maxDepth: 2,
-    suffixes: ['लाई', 'बाट', 'ले', 'मा', 'को', 'की', 'का', 'ता', 'ते', 'ना', 'ने'],
+    suffixes: ['लाई', 'बाट', 'हरू', 'ले', 'मा', 'को', 'की', 'का', 'ता', 'ते', 'ना', 'ने'],
     guards: ['र', 'वा', 'छ', 'थियो', 'होइन', 'को', 'की', 'मा', 'बाट', 'यो', 'त्यो', 'उनी', 'उहाँ', 'हामी', 'तपाईं', 'के', 'किन', 'कहाँ'],
   },
   sa: {
@@ -335,48 +435,13 @@ export const INFLECTION_SPECS = {
     suffixes: ['न्ति', 'न्तः', 'न्ती', 'ति', 'ते', 'तः', 'ता', 'ना', 'या', 'म्', 'नि', 'तुम्'],
     guards: ['च', 'न', 'एव', 'इति', 'वा', 'हि', 'तु', 'यः', 'सः', 'सा', 'तत्', 'इदम्', 'अस्ति', 'सन्ति'],
   },
-  pa: {
-    minStem: 2,
-    maxDepth: 2,
-    suffixes: ['ਨੂੰ', 'ਤੋਂ', 'ਵਿੱਚ', 'ਨਾਲ', 'ਨੇ', 'ਦਾ', 'ਦੀ', 'ਦੇ', 'ਗਿਆ', 'ਦਿੱਤਾ'],
-    guards: ['ਅਤੇ', 'ਜਾਂ', 'ਹੈ', 'ਹਨ', 'ਸੀ', 'ਨਹੀਂ', 'ਵੀ', 'ਕਿ', 'ਇਹ', 'ਉਹ', 'ਮੈਂ', 'ਅਸੀਂ', 'ਤੁਸੀਂ', 'ਕੀ', 'ਕਿਉਂ', 'ਕਿੱਥੇ'],
-  },
-  gu: {
-    minStem: 2,
-    maxDepth: 2,
-    suffixes: ['નું', 'નો', 'ની', 'ને', 'માં', 'થી', 'એ', 'ઓ', 'તા', 'તી', 'તું'],
-    guards: ['અને', 'છે', 'હતું', 'નથી', 'પણ', 'કે', 'આ', 'એ', 'હું', 'અમે', 'તમે', 'શું', 'કેમ', 'ક્યાં'],
-  },
-  kn: {
-    minStem: 2,
-    maxDepth: 2,
-    suffixes: ['ಗಳನ್ನು', 'ದಲ್ಲಿ', 'ದಿಂದ', 'ಅನ್ನು', 'ಗಳು', 'ಗೆ', 'ಗಳ'],
-    guards: ['ಮತ್ತು', 'ಅಥವಾ', 'ಇದು', 'ಅದು', 'ಇಲ್ಲ', 'ಆದರೆ', 'ನಾನು', 'ನಾವು', 'ನೀವು', 'ಏನು', 'ಯಾಕೆ', 'ಎಲ್ಲಿ'],
-  },
-  ta: {
-    minStem: 2,
-    maxDepth: 2,
-    suffixes: ['களுக்கு', 'களில்', 'களை', 'உடன்', 'க்கு', 'கள்', 'இல்', 'ஆல்', 'ஐ'],
-    guards: ['மற்றும்', 'அல்லது', 'இது', 'அது', 'இல்லை', 'ஆனால்', 'நான்', 'நாம்', 'நீங்கள்', 'என்ன', 'ஏன்', 'எங்கே'],
-  },
-  te: {
-    minStem: 2,
-    maxDepth: 2,
-    suffixes: ['నుండి', 'లను', 'లో', 'కు', 'కి', 'లు', 'ను', 'ని'],
-    guards: ['మరియు', 'లేదా', 'ఇది', 'అది', 'లేదు', 'కానీ', 'నేను', 'మేము', 'మీరు', 'ఏమి', 'ఎందుకు', 'ఎక్కడ'],
-  },
-  bn: {
-    minStem: 2,
-    maxDepth: 2,
-    suffixes: ['দের', 'টি', 'টা', 'ছিল', 'রা', 'তে', 'কে', 'র', 'য়'],
-    guards: ['এবং', 'অথবা', 'এই', 'সেই', 'না', 'কিন্তু', 'আমি', 'আমরা', 'তুমি', 'কী', 'কেন', 'কোথায়', 'হয়'],
-  },
-  or: {
-    minStem: 2,
-    maxDepth: 2,
-    suffixes: ['ମାନଙ୍କ', 'ମାନେ', 'ରେ', 'କୁ', 'ର', 'ଟି'],
-    guards: ['ଏବଂ', 'ବା', 'ଏହା', 'ସେଇ', 'ନାହିଁ', 'କିନ୍ତୁ', 'ମୁଁ', 'ଆମେ', 'ତୁମେ', 'କଣ', 'କାହିଁକି', 'କେଉଁଠି'],
-  },
+  pa: GURMUKHI_SPEC,
+  gu: GUJARATI_SPEC,
+  kn: KANNADA_SPEC,
+  ta: TAMIL_SPEC,
+  te: TELUGU_SPEC,
+  bn: BENGALI_SPEC,
+  or: ODIA_SPEC,
 
   // Caucasian / Armenian / Korean / Basque / others
   ka: GEORGIAN_SPEC,
@@ -413,12 +478,8 @@ export const INFLECTION_SPECS = {
     suffixes: ['së', 've', 'sh', 'it', 'ës', 'ë', 't'],
     guards: ['dhe', 'ose', 'është', 'janë', 'nuk', 'por', 'ky', 'kjo', 'ai', 'ajo', 'unë', 'ne', 'ju', 'çfarë', 'pse', 'ku'],
   },
-  si: {
-    minStem: 2,
-    maxDepth: 2,
-    suffixes: ['ගේ', 'ට'],
-    guards: ['සහ', 'නැත', 'මෙය', 'ඒ', 'මම', 'අපි', 'ඔබ', 'කුමක්ද', 'ඇයි'],
-  },
+  si: SINHALA_SPEC,
+  ml: MALAYALAM_SPEC,
 
   // No safe generative rules: Tibetan and Vietnamese rely on their Hunspell
   // affix data and behave exactly as before (empty suffix list = no-op).
@@ -436,12 +497,23 @@ export const INFLECTION_ALIASES = {
 };
 
 // Script fallbacks: used when a language has no curated table and no alias,
-// including user-imported packs in any of the 86 languages or beyond.
+// including user-imported packs in any of the 86 languages or beyond. Every
+// Brahmic script has its own table so a pack in an unlisted language (Maithili,
+// Konkani, Santali, Newari, ...) still gets its script's real inflections.
 export const SCRIPT_SPECS = {
   latin: LATIN_SPEC,
   cyrillic: CYRILLIC_SPEC,
   arabic: ARABIC_SPEC,
   devanagari: DEVANAGARI_SPEC,
+  bengali: BENGALI_SPEC,
+  gurmukhi: GURMUKHI_SPEC,
+  gujarati: GUJARATI_SPEC,
+  oriya: ODIA_SPEC,
+  tamil: TAMIL_SPEC,
+  telugu: TELUGU_SPEC,
+  kannada: KANNADA_SPEC,
+  malayalam: MALAYALAM_SPEC,
+  sinhala: SINHALA_SPEC,
   hangul: HANGUL_SPEC,
   greek: GREEK_SPEC,
   hebrew: HEBREW_SPEC,
@@ -450,6 +522,15 @@ export const SCRIPT_SPECS = {
 
 const SCRIPT_TESTS = [
   ['hangul', /\p{sc=Hangul}/u],
+  ['bengali', /\p{sc=Beng}/u],
+  ['gurmukhi', /\p{sc=Guru}/u],
+  ['gujarati', /\p{sc=Gujr}/u],
+  ['oriya', /\p{sc=Orya}/u],
+  ['tamil', /\p{sc=Taml}/u],
+  ['telugu', /\p{sc=Telu}/u],
+  ['kannada', /\p{sc=Knda}/u],
+  ['malayalam', /\p{sc=Mlym}/u],
+  ['sinhala', /\p{sc=Sinh}/u],
   ['cyrillic', /\p{sc=Cyrillic}/u],
   ['greek', /\p{sc=Greek}/u],
   ['hebrew', /\p{sc=Hebrew}/u],

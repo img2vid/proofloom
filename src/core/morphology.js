@@ -180,7 +180,12 @@ export class Morphology {
           if (guardSet.has(stem)) continue;
           if (verify(stem)) {
             found.push(stem);
-            if (first || found.length >= MAX_ROOTS) return found;
+            // Keep walking through verified stems too: an inflected
+            // intermediate ("মানুষে") must not hide the main root
+            // ("মানুষ") from the suggestion list.
+            if (depth + 1 < this.maxDepth) next.push(stem);
+            if (first) return found;
+            if (found.length >= MAX_ROOTS) return found.sort((a, b) => a.length - b.length);
           } else {
             next.push(stem);
           }
@@ -189,7 +194,9 @@ export class Morphology {
       if (next.length > MAX_FRONTIER) next.length = MAX_FRONTIER;
       frontier = next;
     }
-    return found;
+    // Most-stripped root first: the main root form is the shortest stem
+    // that verified, so it leads the suggestion list.
+    return found.sort((a, b) => a.length - b.length);
   }
 
   lemmatize(word, verify) {

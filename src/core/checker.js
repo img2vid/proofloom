@@ -83,11 +83,11 @@ export class ProofEngine {
     this.morphology = Morphology.forLanguage(language);
     this.morphCache.clear();
     this.british = /^en-(GB|IN|AU|NZ|IE)/i.test(language);
-    this.personal = new Set(personal.map(x => x.toLocaleLowerCase(language)));
+    this.personal = new Set(personal.map(x => String(x).normalize('NFC').toLocaleLowerCase(language)));
     this.wordlist = new Set();
     this.extraSpells = [];
     for (const p of packs.filter(p => p.enabled && (p.language === language || p.language === language.split('-')[0]))) {
-      for (const word of p.words || []) this.wordlist.add(word.toLocaleLowerCase(language));
+      for (const word of p.words || []) this.wordlist.add(String(word).normalize('NFC').toLocaleLowerCase(language));
       if (p.kind === 'hunspell') try { this.extraSpells.push(new LazyHunspell({aff: p.aff, dic: p.dic}, {locale: language})); } catch { /* surface forms remain available */ }
     }
     this.pluginRules = compilePackRules(packs, language);
@@ -95,9 +95,14 @@ export class ProofEngine {
   }
 
   // A word counts as known when it or any of its inflected forms resolves
-  // to a dictionary, personal-list, or domain entry.
+  // to a dictionary, personal-list, domain, or common-corpus entry.
   knownRoot(stem) {
     if (this.personal?.has(stem) || this.wordlist?.has(stem) || this.domainWords?.has(stem)) return true;
+    // Corpus frequency lists (bundled for most languages) vouch for common
+    // roots the LibreOffice wordlists omit. English is excluded: its rich
+    // dictionaries plus the cvc/strict-es gates must keep stacked typos like
+    // "walkeded" flagged.
+    if (!this.english && this.frequencyRank(stem) > 0) return true;
     if (this.extraSpells.some(s => s.correct(stem))) return true;
     return !!(this.spell?.correct(stem));
   }
@@ -119,6 +124,10 @@ export class ProofEngine {
   }
 
   correct(word) {
+    // Bangla and other Indic scripts reach this place in decomposed form from
+    // some IMEs (য় as য + nukta, ো as ে + া). Compare everything against
+    // the dictionaries' canonical NFC spelling.
+    word = String(word ?? '').normalize('NFC');
     const lower = word.toLocaleLowerCase(this.language);
     if (this.personal?.has(lower) || this.wordlist?.has(lower)) return true;
     if (this.domainWords?.has(lower)) return true;
@@ -130,12 +139,13 @@ export class ProofEngine {
   }
 
   frequencyRank(word) {
-    return this.frequency?.get(word.toLowerCase()) || 0;
+    return this.frequency?.get(String(word).toLowerCase().normalize('NFC')) || 0;
   }
 
   // Upgraded suggestion pipeline: mapping table first, then Hunspell, then
   // candidate-generation models ranked by the weighted scorer.
   suggest(word) {
+    word = String(word ?? '').normalize('NFC');
     const lower = word.toLocaleLowerCase(this.language);
     if (this.cache.has(lower)) return this.cache.get(lower);
     let scored = [];

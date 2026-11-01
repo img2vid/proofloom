@@ -1,0 +1,583 @@
+From 9f0bb26686a199f180a3527eb9c174e5e0363896 Mon Sep 17 00:00:00 2001
+From: Z User <z@container>
+Date: Sun, 1 Nov 2026 06:22:13 +0000
+Subject: [PATCH] Accept Bengali and Brahmic inflections everywhere; keep
+ quick-fix off selections
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Modified Bengali words were still reported as spelling errors. The bn
+table carried only a handful of endings, so productive markers never
+resolved: genitive ের/য়ের, locative ে, classifier stacks (গুলো/গুলি,
+খানা, টা/টি with their case forms), the animate plural রা, and the
+person/tense verb endings (েছি/েছিলাম, ছি/চ্ছি, লাম, বে, েন, ুন, ো).
+The Bengali spec now covers all of them, chains three deep, and treats
+vowel-stem forms (বই -> বইয়ের) directly; typos like মানুসের,
+করক্স, and the doubled বইয়েরর stay flagged.
+
+Every other Brahmic script gains the same treatment, and each curated
+table doubles as its script's fallback so imported packs in any
+neighbouring language get real morphology too: Gujarati's plural sign
+was the wrong codepoint (ઓ letter -> ો sign), Tamil now undoes nasal
+sandhi and doubled-த் stems (மரம் -> மரங்கள், மரத்தை), Telugu undoes
+the retroflex plural (ఇల్లు -> ఇళ్లు), Hindi oblique stems swap back
+to -ा (লड़का -> लड़कें), and Gurmukhi, Kannada, Odia, Sinhala, and a
+new Malayalam table round out the set. Tokenization keeps ZWJ/ZWNJ
+inside Indic words instead of splitting conjuncts in two.
+
+Two further correctness fixes make the whole layer trustworthy for
+Indic input: words are compared in NFC (some IMEs emit য় as য + nukta
+and ো as ে + া, which previously guaranteed a flag), and the bundled
+corpus frequency lists vouch for common roots the LibreOffice wordlists
+omit (English keeps its stacked-typo gates and never uses that path).
+Suggestion now walks through inflected intermediates so the main root
+form leads the list (মানুষ, not মানুষে).
+
+The in-editor quick-fix popover no longer fights text selection: a
+click that ends a drag, double-click, or shift-click selection closes
+the popover instead of opening one, and any non-collapsed selection in
+the editor closes an open popover, so picking corrections and selecting
+text stay independent gestures.
+---
+ src/app.js                      |  15 ++-
+ src/core/algorithms/tokenize.js |   6 +-
+ src/core/checker.js             |  18 ++-
+ src/core/data/inflections.js    | 189 +++++++++++++++++++++++---------
+ src/core/morphology.js          |  11 +-
+ src/worker.js                   |   2 +-
+ tests/morphology.test.mjs       |  76 ++++++++++++-
+ 7 files changed, 252 insertions(+), 65 deletions(-)
+
+diff --git a/src/app.js b/src/app.js
+index 86fc410..b16a940 100644
+--- a/src/app.js
++++ b/src/app.js
+@@ -485,14 +485,27 @@ $('#menu-button').onclick=()=>document.body.classList.toggle('nav-open');
+ dialog.addEventListener('click',ev=>{if(ev.target===dialog){const r=dialog.getBoundingClientRect();if(ev.clientX<r.left||ev.clientX>r.right||ev.clientY<r.top||ev.clientY>r.bottom)dialog.close();}});
+ window.addEventListener('hashchange',()=>{void flushSave();render();});window.addEventListener('resize',()=>{resizeEditor();closeQuickFix();});
+ // Click-to-correct: a click in the editor that lands on a highlighted word
+-// opens the correction popover for that issue.
++// opens the correction popover for that issue. Selecting text (drag,
++// double-click, shift-click) is never a correction request: a live
++// non-collapsed selection only closes the popover instead of opening one,
++// so the popover can no longer steal focus mid-selection and wipe out the
++// text the user just selected.
+ document.addEventListener('click',event=>{
+   if(state.route!=='editor'||dialog.open)return;
+   const ta=event.target.closest('#editor');
+   if(!ta)return;
++  if((ta.selectionEnd??0)>(ta.selectionStart??0)){closeQuickFix();return;}
+   const issue=findIssueAtOffset(state.issues,ta.selectionStart??0);
+   if(issue)openQuickFixFor(issue);else closeQuickFix();
+ });
++// Selections made with the keyboard (or programmatically) close the popover
++// as well, so a correction card never sits between the user and the text
++// they are selecting.
++document.addEventListener('selectionchange',event=>{
++  if(state.route!=='editor'||!quickFixOpen())return;
++  const ta=event.target;
++  if(ta&&ta.id==='editor'&&(ta.selectionEnd??0)>(ta.selectionStart??0))closeQuickFix();
++});
+ window.addEventListener('beforeunload',event=>{if(!state.storage){event.preventDefault();event.returnValue='';}});
+ document.addEventListener('visibilitychange',()=>{if(document.hidden)void flushSave();});
+ 
+diff --git a/src/core/algorithms/tokenize.js b/src/core/algorithms/tokenize.js
+index d91ecaf..a01cd9a 100644
+--- a/src/core/algorithms/tokenize.js
++++ b/src/core/algorithms/tokenize.js
+@@ -1,9 +1,11 @@
+ // Text segmentation algorithms: words, sentences, paragraphs with offsets.
+ 
+-// 28. Word tokenization with UTF-16 offsets.
++// 28. Word tokenization with UTF-16 offsets. ZWJ/ZWNJ join conjuncts in
++// Indic scripts (Sinhala මනුෂ්‍ය, Marathi half forms), so they belong
++// inside a word instead of splitting it in two.
+ export function tokenizeWords(text) {
+   const out = [];
+-  const pattern = /[\p{L}\p{M}][\p{L}\p{M}'’-]*/gu;
++  const pattern = /[\p{L}\p{M}][\p{L}\p{M}\u200C\u200D'’-]*/gu;
+   for (const m of text.matchAll(pattern)) {
+     const word = m[0];
+     out.push({ word, lower: word.toLowerCase().replace(/[’]/g, "'"), start: m.index, end: m.index + word.length });
+diff --git a/src/core/checker.js b/src/core/checker.js
+index ffe1ef0..7707c5d 100644
+--- a/src/core/checker.js
++++ b/src/core/checker.js
+@@ -83,11 +83,11 @@ export class ProofEngine {
+     this.morphology = Morphology.forLanguage(language);
+     this.morphCache.clear();
+     this.british = /^en-(GB|IN|AU|NZ|IE)/i.test(language);
+-    this.personal = new Set(personal.map(x => x.toLocaleLowerCase(language)));
++    this.personal = new Set(personal.map(x => String(x).normalize('NFC').toLocaleLowerCase(language)));
+     this.wordlist = new Set();
+     this.extraSpells = [];
+     for (const p of packs.filter(p => p.enabled && (p.language === language || p.language === language.split('-')[0]))) {
+-      for (const word of p.words || []) this.wordlist.add(word.toLocaleLowerCase(language));
++      for (const word of p.words || []) this.wordlist.add(String(word).normalize('NFC').toLocaleLowerCase(language));
+       if (p.kind === 'hunspell') try { this.extraSpells.push(new LazyHunspell({aff: p.aff, dic: p.dic}, {locale: language})); } catch { /* surface forms remain available */ }
+     }
+     this.pluginRules = compilePackRules(packs, language);
+@@ -95,9 +95,14 @@ export class ProofEngine {
+   }
+ 
+   // A word counts as known when it or any of its inflected forms resolves
+-  // to a dictionary, personal-list, or domain entry.
++  // to a dictionary, personal-list, domain, or common-corpus entry.
+   knownRoot(stem) {
+     if (this.personal?.has(stem) || this.wordlist?.has(stem) || this.domainWords?.has(stem)) return true;
++    // Corpus frequency lists (bundled for most languages) vouch for common
++    // roots the LibreOffice wordlists omit. English is excluded: its rich
++    // dictionaries plus the cvc/strict-es gates must keep stacked typos like
++    // "walkeded" flagged.
++    if (!this.english && this.frequencyRank(stem) > 0) return true;
+     if (this.extraSpells.some(s => s.correct(stem))) return true;
+     return !!(this.spell?.correct(stem));
+   }
+@@ -119,6 +124,10 @@ export class ProofEngine {
+   }
+ 
+   correct(word) {
++    // Bangla and other Indic scripts reach this place in decomposed form from
++    // some IMEs (য় as য + nukta, ো as ে + া). Compare everything against
++    // the dictionaries' canonical NFC spelling.
++    word = String(word ?? '').normalize('NFC');
+     const lower = word.toLocaleLowerCase(this.language);
+     if (this.personal?.has(lower) || this.wordlist?.has(lower)) return true;
+     if (this.domainWords?.has(lower)) return true;
+@@ -130,12 +139,13 @@ export class ProofEngine {
+   }
+ 
+   frequencyRank(word) {
+-    return this.frequency?.get(word.toLowerCase()) || 0;
++    return this.frequency?.get(String(word).toLowerCase().normalize('NFC')) || 0;
+   }
+ 
+   // Upgraded suggestion pipeline: mapping table first, then Hunspell, then
+   // candidate-generation models ranked by the weighted scorer.
+   suggest(word) {
++    word = String(word ?? '').normalize('NFC');
+     const lower = word.toLocaleLowerCase(this.language);
+     if (this.cache.has(lower)) return this.cache.get(lower);
+     let scored = [];
+diff --git a/src/core/data/inflections.js b/src/core/data/inflections.js
+index 8dd9016..dc8dbf1 100644
+--- a/src/core/data/inflections.js
++++ b/src/core/data/inflections.js
+@@ -20,7 +20,9 @@
+ //
+ // Every bundled language resolves to a curated spec, an alias onto a close
+ // relative, or a script fallback (_latin, _cyrillic, _arabic, _devanagari,
+-// _hangul, _greek, _hebrew, _georgian), so the mechanism covers all of them.
++// _bengali, _gurmukhi, _gujarati, _oriya, _tamil, _telugu, _kannada,
++// _malayalam, _sinhala, _hangul, _greek, _hebrew, _georgian), so the
++// mechanism covers all of them.
+ 
+ const cyrillicGuards = ['и', 'в', 'не', 'на', 'что', 'это', 'как', 'а', 'но', 'по', 'из', 'у', 'за', 'то', 'же', 'бы', 'от', 'до', 'для', 'при', 'над', 'под', 'или', 'если', 'уже', 'еще', 'ещё', 'там', 'тут', 'очень'];
+ 
+@@ -67,10 +69,103 @@ const ARABIC_SPEC = {
+ const DEVANAGARI_SPEC = {
+   minStem: 2,
+   maxDepth: 2,
+-  suffixes: ['रहा', 'रही', 'रहे', 'गया', 'गयी', 'गये', 'गा', 'गे', 'गी', 'ता', 'ते', 'ती', 'ना', 'ने', 'नी', 'या', 'ए', 'ओ', 'इयाँ', 'इयों', 'कर', 'त'],
++  suffixes: ['रहा', 'रही', 'रहे', 'गया', 'गयी', 'गये', 'गा', 'गे', 'गी', 'ता', 'ते', 'ती', 'ना', 'ने', 'नी', 'या', 'ए', 'ओ', 'ओं', 'ें', 'ों', 'इयाँ', 'इयों', 'वाला', 'वाले', 'वाली', 'कर', 'त'],
++  // Oblique/vocalized stems drop the final ा (लड़का -> लड़के, लड़कें).
++  swaps: [['ें', 'ा'], ['ों', 'ा'], ['ो', 'ा'], ['े', 'ा']],
+   guards: ['और', 'का', 'की', 'के', 'को', 'में', 'से', 'पर', 'यह', 'वह', 'है', 'हैं', 'था', 'थी', 'नहीं', 'भी', 'कि', 'जो', 'तो', 'ही', 'एक', 'इस', 'उस', 'मैं', 'हम', 'आप', 'क्या'],
+ };
+ 
++// Brahmic-script tables. Each curated spec doubles as the fallback for its
++// script, so imported packs in neighbouring languages (Assamese via the bn
++// alias, Maithili, Konkani, Bhojpuri, Malayalam, ...) get real morphology
++// instead of nothing.
++const BENGALI_SPEC = {
++  minStem: 2,
++  maxDepth: 3,
++  suffixes: [
++    // Plural/classifier stacks with their own case endings.
++    'গুলোতেই', 'গুলোতে', 'গুলোকে', 'গুলোর', 'গুলোয়', 'গুলোই', 'গুলো',
++    'গুলিতে', 'গুলিকে', 'গুলির', 'গুলিয়', 'গুলি',
++    'খানাতে', 'খানায়', 'খানার', 'খানা', 'খানি',
++    'টাকেই', 'টাকে', 'টাতে', 'টায়', 'টার', 'টা', 'টিতেই', 'টিতে', 'টির', 'টি',
++    'দেরকে', 'দের', 'রা',
++    // Verb chains: perfect/progressive/past/future/person endings.
++    'েছিলাম', 'েছিলেন', 'েছিলে', 'েছিল', 'েছেন', 'েছি', 'েছে', 'েছ',
++    'চ্ছিলাম', 'চ্ছিলেন', 'চ্ছিলে', 'চ্ছিল', 'চ্ছেন', 'চ্ছি', 'চ্ছে', 'চ্ছ',
++    'ছিলাম', 'ছিলেন', 'ছিলে', 'ছিল', 'ছেন', 'ছি', 'ছে', 'ছ',
++    'লাম', 'লেন', 'লে', 'ল', 'বেন', 'বে', 'বো', 'ব', 'ুন', 'েন', 'িয়ে',
++    // Case endings: ablative/instrumental/manner, locative, accusative,
++    // genitive (with the য়-inserted vowel-stem forms), emphatics.
++    'দ্বারা', 'থেকে', 'হতে', 'দিয়ে', 'ভাবে', 'বারে',
++    'তে', 'কে', 'য়ের', 'ের', 'য়ে', 'য়', 'ার', 'ো', 'ও', 'ই', 'ি', 'ে', 'র',
++  ],
++  guards: ['এবং', 'অথবা', 'অথচ', 'কিন্তু', 'কিংবা', 'এই', 'সেই', 'ওই', 'যে', 'কি', 'কী', 'না', 'হ্যাঁ', 'তো', 'আর', 'বা', 'যদি', 'তাহলে', 'তবে', 'যেহেতু', 'কারণ', 'এখন', 'তখন', 'সব', 'কিছু', 'কেউ', 'কোনো', 'কোন', 'খুব', 'অনেক', 'আমি', 'আমরা', 'আমার', 'আমাকে', 'তুমি', 'তোমরা', 'তোমার', 'আপনি', 'সে', 'তার', 'তাকে', 'তাহার', 'তারা', 'তাদের', 'এটা', 'ওটা', 'এটি', 'ওটি', 'এরা', 'ওরা', 'এগুলো', 'ওগুলো', 'ইত্যাদি', 'হয়', 'এখানে', 'ওখানে', 'যেখানে', 'কোথায়', 'কেন', 'কখন', 'কীভাবে'],
++};
++
++const GURMUKHI_SPEC = {
++  minStem: 2,
++  maxDepth: 2,
++  suffixes: ['ਿਆਂ', 'ਵਾਲਾ', 'ਵਾਲੀ', 'ਵਾਲੇ', 'ਨੂੰ', 'ਤੋਂ', 'ਵਿੱਚ', 'ਨਾਲ', 'ਾਂ', 'ਨੇ', 'ਦਾ', 'ਦੀ', 'ਦੇ', 'ਕੇ', 'ਗਿਆ', 'ਦਿੱਤਾ', 'ਹੈ', 'ਹਨ', 'ਸੀ'],
++  guards: ['ਅਤੇ', 'ਜਾਂ', 'ਹੈ', 'ਹਨ', 'ਸੀ', 'ਨਹੀਂ', 'ਵੀ', 'ਕਿ', 'ਇਹ', 'ਉਹ', 'ਮੈਂ', 'ਅਸੀਂ', 'ਤੁਸੀਂ', 'ਕੀ', 'ਕਿਉਂ', 'ਕਿੱਥੇ'],
++};
++
++const GUJARATI_SPEC = {
++  minStem: 2,
++  maxDepth: 2,
++  // The plural marker is the vowel SIGN ો, not the independent letter ઓ.
++  suffixes: ['વાળા', 'ોને', 'ોમાં', 'નું', 'નો', 'ની', 'ના', 'ને', 'માં', 'થી', 'એ', 'ો', 'તા', 'તી', 'તું'],
++  guards: ['અને', 'છે', 'હતું', 'નથી', 'પણ', 'કે', 'આ', 'એ', 'હું', 'અમે', 'તમે', 'શું', 'કેમ', 'ક્યાં'],
++};
++
++const KANNADA_SPEC = {
++  minStem: 2,
++  maxDepth: 2,
++  suffixes: ['ಗಳನ್ನು', 'ಗಳಿಂದ', 'ಗಳಿಗೆ', 'ಯಲ್ಲಿ', 'ಯಿಂದ', 'ಯನ್ನು', 'ದಲ್ಲಿ', 'ದಿಂದ', 'ಅನ್ನು', 'ಗಳು', 'ಗೆ', 'ಗಳ', 'ನ', 'ದ', 'ಯ'],
++  guards: ['ಮತ್ತು', 'ಅಥವಾ', 'ಇದು', 'ಅದು', 'ಇಲ್ಲ', 'ಆದರೆ', 'ನಾನು', 'ನಾವು', 'ನೀವು', 'ಏನು', 'ಯಾಕೆ', 'ಎಲ್ಲಿ'],
++};
++
++const TAMIL_SPEC = {
++  minStem: 2,
++  maxDepth: 2,
++  // மரம்-type stems surface as மரத்தை/மரத்தில்: the doubled த் forms swap
++  // back to the citation -ம் ending as well as stripping.
++  suffixes: ['களுக்கு', 'களுடன்', 'களால்', 'களின்', 'களில்', 'களை', 'உடன்', 'ுடைய', 'ுக்கு', 'ால்', 'க்கு', 'கள்', 'இல்', 'ன்', 'ல்', 'து', 'ஐ'],
++  // ம்-final stems assimilate before க/த (மரம் -> மரங்கள், மரத்தை), so
++  // the nasal and doubled-த் endings swap back to the citation form.
++  swaps: [['ங்கள்', 'ம்'], ['கள்', 'ம்'], ['த்தை', 'ம்'], ['த்தில்', 'ம்'], ['த்துடன்', 'ம்'], ['த்தால்', 'ம்'], ['த்தின்', 'ம்'], ['த்துக்கு', 'ம்'], ['த்', 'ம்']],
++  guards: ['மற்றும்', 'அல்லது', 'இது', 'அது', 'இல்லை', 'ஆனால்', 'நான்', 'நாம்', 'நீங்கள்', 'என்ன', 'ஏன்', 'எங்கே'],
++};
++
++const TELUGU_SPEC = {
++  minStem: 2,
++  maxDepth: 2,
++  suffixes: ['యొక్క', 'నుండి', 'కోసం', 'తో', 'లను', 'ాలు', 'ాని', 'లో', 'కు', 'కి', 'లు', 'ను', 'ని'],
++  // ఇల్లు -> ఇళ్లు: the plural retroflexes and doubles the ల.
++  swaps: [['ాలు', 'ం'], ['ాని', 'ం'], ['ళ్లు', 'ల్లు']],
++  guards: ['మరియు', 'లేదా', 'ఇది', 'అది', 'లేదు', 'కానీ', 'నేను', 'మేము', 'మీరు', 'ఏమి', 'ఎందుకు', 'ఎక్కడ'],
++};
++
++const ODIA_SPEC = {
++  minStem: 2,
++  maxDepth: 2,
++  suffixes: ['ମାନଙ୍କ', 'ଗୁଡ଼ିକ', 'ମାନେ', 'ପାଇଁ', 'ଟିକୁ', 'ଟିର', 'ରେ', 'ରୁ', 'କୁ', 'ଟା', 'ର', 'ଟି'],
++  guards: ['ଏବଂ', 'ବା', 'ଏହା', 'ସେଇ', 'ନାହିଁ', 'କିନ୍ତୁ', 'ମୁଁ', 'ଆମେ', 'ତୁମେ', 'କଣ', 'କାହିଁକି', 'କେଉଁଠି'],
++};
++
++const SINHALA_SPEC = {
++  minStem: 2,
++  maxDepth: 2,
++  suffixes: ['වලින්', 'වලට', 'වල', 'ාගේ', 'ලා', 'ගේ', 'ින්', 'ෙන්', 'න්න', 'නවා', 'ට', 'මි', 'හි', 'ති'],
++  guards: ['සහ', 'නැත', 'මෙය', 'ඒ', 'මම', 'අපි', 'ඔබ', 'කුමක්ද', 'ඇයි'],
++};
++
++const MALAYALAM_SPEC = {
++  minStem: 2,
++  maxDepth: 2,
++  suffixes: ['ക്കളിൽ', 'ക്കളുടെ', 'ക്കളെ', 'ക്കൾ', 'കളിൽ', 'കളുടെ', 'കളെ', 'ത്തിന്റെ', 'ത്തിൽ', 'ത്തെ', 'യിൽ', 'യുടെ', 'യെ', 'ുടെ', 'ിൽ', 'ന്റെ', 'ൻ', 'ൾ', 'ർ', 'ം'],
++  guards: ['ഒപ്പം', 'അല്ലെങ്കിൽ', 'ഇത്', 'അത്', 'അല്ല', 'പക്ഷേ', 'ഞാൻ', 'നമ്മൾ', 'നിങ്ങൾ', 'എന്ത്', 'എന്തുകൊണ്ട്', 'എവിടെ'],
++};
++
+ const HANGUL_SPEC = {
+   minStem: 2,
+   maxDepth: 2,
+@@ -315,18 +410,23 @@ export const INFLECTION_SPECS = {
+   },
+   he: HEBREW_SPEC,
+ 
+-  // Indic
++  // Indic. Bengali gets the fullest table: Bangla attaches case markers
++  // (কে, তে, ের/য়ের, ে/য়), classifiers (টা/টি, খানা, গুলো/গুলি), plural
++  // markers (রা, দের) and person/tense verb endings (ছি/চ্ছি, েছি, লাম,
++  // বে, ি, েন, ুন, ো) directly to the stem, and vowel-final stems insert
++  // য় before vowel-initial endings (বই -> বইয়ের), so those endings exist
++  // both bare and after য়.
+   hi: DEVANAGARI_SPEC,
+   mr: {
+     minStem: 2,
+     maxDepth: 2,
+-    suffixes: ['त्या', 'मध्ये', 'ला', 'चा', 'ची', 'चे', 'ने', 'शी', 'ता', 'ते', 'ती', 'ना', 'ने', 'त', 'या'],
++    suffixes: ['त्या', 'मध्ये', 'च्या', 'ला', 'चा', 'ची', 'चे', 'ने', 'शी', 'ता', 'ते', 'ती', 'ना', 'ने', 'त', 'या', 'ओं', 'े'],
+     guards: ['आणि', 'का', 'की', 'के', 'को', 'मध्ये', 'से', 'पर', 'हा', 'ही', 'हे', 'आहे', 'नाही', 'पण', 'तो', 'ती', 'मी', 'आम्ही', 'तुम्ही', 'काय', 'का'],
+   },
+   ne: {
+     minStem: 2,
+     maxDepth: 2,
+-    suffixes: ['लाई', 'बाट', 'ले', 'मा', 'को', 'की', 'का', 'ता', 'ते', 'ना', 'ने'],
++    suffixes: ['लाई', 'बाट', 'हरू', 'ले', 'मा', 'को', 'की', 'का', 'ता', 'ते', 'ना', 'ने'],
+     guards: ['र', 'वा', 'छ', 'थियो', 'होइन', 'को', 'की', 'मा', 'बाट', 'यो', 'त्यो', 'उनी', 'उहाँ', 'हामी', 'तपाईं', 'के', 'किन', 'कहाँ'],
+   },
+   sa: {
+@@ -335,48 +435,13 @@ export const INFLECTION_SPECS = {
+     suffixes: ['न्ति', 'न्तः', 'न्ती', 'ति', 'ते', 'तः', 'ता', 'ना', 'या', 'म्', 'नि', 'तुम्'],
+     guards: ['च', 'न', 'एव', 'इति', 'वा', 'हि', 'तु', 'यः', 'सः', 'सा', 'तत्', 'इदम्', 'अस्ति', 'सन्ति'],
+   },
+-  pa: {
+-    minStem: 2,
+-    maxDepth: 2,
+-    suffixes: ['ਨੂੰ', 'ਤੋਂ', 'ਵਿੱਚ', 'ਨਾਲ', 'ਨੇ', 'ਦਾ', 'ਦੀ', 'ਦੇ', 'ਗਿਆ', 'ਦਿੱਤਾ'],
+-    guards: ['ਅਤੇ', 'ਜਾਂ', 'ਹੈ', 'ਹਨ', 'ਸੀ', 'ਨਹੀਂ', 'ਵੀ', 'ਕਿ', 'ਇਹ', 'ਉਹ', 'ਮੈਂ', 'ਅਸੀਂ', 'ਤੁਸੀਂ', 'ਕੀ', 'ਕਿਉਂ', 'ਕਿੱਥੇ'],
+-  },
+-  gu: {
+-    minStem: 2,
+-    maxDepth: 2,
+-    suffixes: ['નું', 'નો', 'ની', 'ને', 'માં', 'થી', 'એ', 'ઓ', 'તા', 'તી', 'તું'],
+-    guards: ['અને', 'છે', 'હતું', 'નથી', 'પણ', 'કે', 'આ', 'એ', 'હું', 'અમે', 'તમે', 'શું', 'કેમ', 'ક્યાં'],
+-  },
+-  kn: {
+-    minStem: 2,
+-    maxDepth: 2,
+-    suffixes: ['ಗಳನ್ನು', 'ದಲ್ಲಿ', 'ದಿಂದ', 'ಅನ್ನು', 'ಗಳು', 'ಗೆ', 'ಗಳ'],
+-    guards: ['ಮತ್ತು', 'ಅಥವಾ', 'ಇದು', 'ಅದು', 'ಇಲ್ಲ', 'ಆದರೆ', 'ನಾನು', 'ನಾವು', 'ನೀವು', 'ಏನು', 'ಯಾಕೆ', 'ಎಲ್ಲಿ'],
+-  },
+-  ta: {
+-    minStem: 2,
+-    maxDepth: 2,
+-    suffixes: ['களுக்கு', 'களில்', 'களை', 'உடன்', 'க்கு', 'கள்', 'இல்', 'ஆல்', 'ஐ'],
+-    guards: ['மற்றும்', 'அல்லது', 'இது', 'அது', 'இல்லை', 'ஆனால்', 'நான்', 'நாம்', 'நீங்கள்', 'என்ன', 'ஏன்', 'எங்கே'],
+-  },
+-  te: {
+-    minStem: 2,
+-    maxDepth: 2,
+-    suffixes: ['నుండి', 'లను', 'లో', 'కు', 'కి', 'లు', 'ను', 'ని'],
+-    guards: ['మరియు', 'లేదా', 'ఇది', 'అది', 'లేదు', 'కానీ', 'నేను', 'మేము', 'మీరు', 'ఏమి', 'ఎందుకు', 'ఎక్కడ'],
+-  },
+-  bn: {
+-    minStem: 2,
+-    maxDepth: 2,
+-    suffixes: ['দের', 'টি', 'টা', 'ছিল', 'রা', 'তে', 'কে', 'র', 'য়'],
+-    guards: ['এবং', 'অথবা', 'এই', 'সেই', 'না', 'কিন্তু', 'আমি', 'আমরা', 'তুমি', 'কী', 'কেন', 'কোথায়', 'হয়'],
+-  },
+-  or: {
+-    minStem: 2,
+-    maxDepth: 2,
+-    suffixes: ['ମାନଙ୍କ', 'ମାନେ', 'ରେ', 'କୁ', 'ର', 'ଟି'],
+-    guards: ['ଏବଂ', 'ବା', 'ଏହା', 'ସେଇ', 'ନାହିଁ', 'କିନ୍ତୁ', 'ମୁଁ', 'ଆମେ', 'ତୁମେ', 'କଣ', 'କାହିଁକି', 'କେଉଁଠି'],
+-  },
++  pa: GURMUKHI_SPEC,
++  gu: GUJARATI_SPEC,
++  kn: KANNADA_SPEC,
++  ta: TAMIL_SPEC,
++  te: TELUGU_SPEC,
++  bn: BENGALI_SPEC,
++  or: ODIA_SPEC,
+ 
+   // Caucasian / Armenian / Korean / Basque / others
+   ka: GEORGIAN_SPEC,
+@@ -413,12 +478,8 @@ export const INFLECTION_SPECS = {
+     suffixes: ['së', 've', 'sh', 'it', 'ës', 'ë', 't'],
+     guards: ['dhe', 'ose', 'është', 'janë', 'nuk', 'por', 'ky', 'kjo', 'ai', 'ajo', 'unë', 'ne', 'ju', 'çfarë', 'pse', 'ku'],
+   },
+-  si: {
+-    minStem: 2,
+-    maxDepth: 2,
+-    suffixes: ['ගේ', 'ට'],
+-    guards: ['සහ', 'නැත', 'මෙය', 'ඒ', 'මම', 'අපි', 'ඔබ', 'කුමක්ද', 'ඇයි'],
+-  },
++  si: SINHALA_SPEC,
++  ml: MALAYALAM_SPEC,
+ 
+   // No safe generative rules: Tibetan and Vietnamese rely on their Hunspell
+   // affix data and behave exactly as before (empty suffix list = no-op).
+@@ -436,12 +497,23 @@ export const INFLECTION_ALIASES = {
+ };
+ 
+ // Script fallbacks: used when a language has no curated table and no alias,
+-// including user-imported packs in any of the 86 languages or beyond.
++// including user-imported packs in any of the 86 languages or beyond. Every
++// Brahmic script has its own table so a pack in an unlisted language (Maithili,
++// Konkani, Santali, Newari, ...) still gets its script's real inflections.
+ export const SCRIPT_SPECS = {
+   latin: LATIN_SPEC,
+   cyrillic: CYRILLIC_SPEC,
+   arabic: ARABIC_SPEC,
+   devanagari: DEVANAGARI_SPEC,
++  bengali: BENGALI_SPEC,
++  gurmukhi: GURMUKHI_SPEC,
++  gujarati: GUJARATI_SPEC,
++  oriya: ODIA_SPEC,
++  tamil: TAMIL_SPEC,
++  telugu: TELUGU_SPEC,
++  kannada: KANNADA_SPEC,
++  malayalam: MALAYALAM_SPEC,
++  sinhala: SINHALA_SPEC,
+   hangul: HANGUL_SPEC,
+   greek: GREEK_SPEC,
+   hebrew: HEBREW_SPEC,
+@@ -450,6 +522,15 @@ export const SCRIPT_SPECS = {
+ 
+ const SCRIPT_TESTS = [
+   ['hangul', /\p{sc=Hangul}/u],
++  ['bengali', /\p{sc=Beng}/u],
++  ['gurmukhi', /\p{sc=Guru}/u],
++  ['gujarati', /\p{sc=Gujr}/u],
++  ['oriya', /\p{sc=Orya}/u],
++  ['tamil', /\p{sc=Taml}/u],
++  ['telugu', /\p{sc=Telu}/u],
++  ['kannada', /\p{sc=Knda}/u],
++  ['malayalam', /\p{sc=Mlym}/u],
++  ['sinhala', /\p{sc=Sinh}/u],
+   ['cyrillic', /\p{sc=Cyrillic}/u],
+   ['greek', /\p{sc=Greek}/u],
+   ['hebrew', /\p{sc=Hebrew}/u],
+diff --git a/src/core/morphology.js b/src/core/morphology.js
+index 884d9f5..7d619af 100644
+--- a/src/core/morphology.js
++++ b/src/core/morphology.js
+@@ -180,7 +180,12 @@ export class Morphology {
+           if (guardSet.has(stem)) continue;
+           if (verify(stem)) {
+             found.push(stem);
+-            if (first || found.length >= MAX_ROOTS) return found;
++            // Keep walking through verified stems too: an inflected
++            // intermediate ("মানুষে") must not hide the main root
++            // ("মানুষ") from the suggestion list.
++            if (depth + 1 < this.maxDepth) next.push(stem);
++            if (first) return found;
++            if (found.length >= MAX_ROOTS) return found.sort((a, b) => a.length - b.length);
+           } else {
+             next.push(stem);
+           }
+@@ -189,7 +194,9 @@ export class Morphology {
+       if (next.length > MAX_FRONTIER) next.length = MAX_FRONTIER;
+       frontier = next;
+     }
+-    return found;
++    // Most-stripped root first: the main root form is the shortest stem
++    // that verified, so it leads the suggestion list.
++    return found.sort((a, b) => a.length - b.length);
+   }
+ 
+   lemmatize(word, verify) {
+diff --git a/src/worker.js b/src/worker.js
+index d3922bc..d144edc 100644
+--- a/src/worker.js
++++ b/src/worker.js
+@@ -52,7 +52,7 @@ async function loadFrequency(variant) {
+   try {
+     const parsed = JSON.parse(await loadGzipped(`./data/frequency/${variant}.json.gz`));
+     const map = new Map();
+-    if (Array.isArray(parsed.words)) for (const [index, word] of parsed.words.entries()) map.set(String(word).toLowerCase(), index + 1);
++    if (Array.isArray(parsed.words)) for (const [index, word] of parsed.words.entries()) map.set(String(word).toLowerCase().normalize('NFC'), index + 1);
+     return map.size ? map : null;
+   } catch { return null; }
+ }
+diff --git a/tests/morphology.test.mjs b/tests/morphology.test.mjs
+index e0365a3..97e564d 100644
+--- a/tests/morphology.test.mjs
++++ b/tests/morphology.test.mjs
+@@ -15,6 +15,7 @@ import ko from 'dictionary-ko';
+ import {ProofEngine} from '../src/core/checker.js';
+ import {Morphology} from '../src/core/morphology.js';
+ import {LazyHunspell} from '../src/core/lazy-hunspell.js';
++import {tokenizeWords} from '../src/core/algorithms/tokenize.js';
+ 
+ const known = words => {
+   const set = new Set(words);
+@@ -41,6 +42,11 @@ test('languages without a curated table fall back to their script', () => {
+   assert.ok(unknown.specsFor('الكتاب').length, 'arabic fallback applies');
+   assert.ok(unknown.specsFor('사랑은').length, 'hangul fallback applies');
+   assert.ok(unknown.specsFor('चलता').length, 'devanagari fallback applies');
++  assert.ok(unknown.specsFor('মানুষের')[0].suffixes.includes('ের'), 'bengali fallback applies');
++  assert.ok(unknown.specsFor('மரங்கள்')[0].suffixes.includes('கள்'), 'tamil fallback applies');
++  assert.ok(unknown.specsFor('ਪੁਸਤਕਾਂ')[0].suffixes.includes('ਾਂ'), 'gurmukhi fallback applies');
++  assert.ok(unknown.specsFor('పుస్తకాలు')[0].suffixes.includes('ాలు'), 'telugu fallback applies');
++  assert.ok(unknown.specsFor('വീട്ടിൽ')[0].suffixes.includes('ിൽ'), 'malayalam fallback applies');
+ });
+ 
+ test('every bundled language code resolves to an active spec', () => {
+@@ -105,6 +111,34 @@ test('agglutinative and fusional languages resolve chains to their roots', () =>
+   assert.deepEqual(Morphology.forLanguage('nl').roots('huizen', known(['huis'])), ['huis']);
+ });
+ 
++test('Bengali declensions and conjugations resolve to their roots', () => {
++  const morph = Morphology.forLanguage('bn-BD');
++  const roots = (word, dict) => morph.roots(word, known(dict));
++  // Nominal case + classifier chains.
++  assert.deepEqual(roots('মানুষের', ['মানুষ']), ['মানুষ'], 'genitive ের chains through মানুষে to the root');
++  assert.deepEqual(roots('বইয়ের', ['বই']), ['বই'], 'vowel stems insert য় before ের');
++  assert.deepEqual(roots('শহরে', ['শহর']), ['শহর'], 'locative ে');
++  assert.deepEqual(roots('বইগুলো', ['বই']), ['বই'], 'classifier গুলো');
++  assert.deepEqual(roots('ছেলেদের', ['ছেলে']), ['ছেলে'], 'animate plural দের');
++  assert.deepEqual(roots('মানুষটির', ['মানুষ']), ['মানুষ'], 'classifier টির');
++  // Verbal endings.
++  assert.deepEqual(roots('করছি', ['কর']), ['কর'], 'present progressive ছি');
++  assert.deepEqual(roots('দেখেছিলাম', ['দেখ']), ['দেখ'], 'past perfect েছিলাম');
++  assert.deepEqual(roots('দেখবে', ['দেখ']), ['দেখ'], 'future বে');
++  assert.deepEqual(roots('যাচ্ছি', ['যা']), ['যা'], 'progressive of vowel stems');
++  // Assamese shares the Bengali table.
++  assert.equal(Morphology.forLanguage('as-IN').primary, Morphology.forLanguage('bn').primary);
++});
++
++test('Bengali typos that only look like inflections stay flagged', () => {
++  const morph = Morphology.forLanguage('bn-BD');
++  const roots = (word, dict) => morph.roots(word, known(dict));
++  assert.deepEqual(roots('মানুসের', ['মানুষ']), [], 'wrong conjunct স for ষ stays a typo');
++  assert.deepEqual(roots('করক্স', ['কর']), [], 'garbage ending stays a typo');
++  assert.deepEqual(roots('বইয়েরর', ['বই']), [], 'doubled suffix boundary stays a typo');
++  assert.deepEqual(roots('করলামলামx', ['কর']), [], 'stacked endings with junk stay a typo');
++});
++
+ // --- Engine integration: wordlist-only dictionaries ---
+ 
+ const wordEngine = (language, words) => {
+@@ -147,9 +181,43 @@ test('wordlist-only dictionaries accept inflected forms across languages', () =>
+ 
+   const hu = wordEngine('hu', ['ház']);
+   assert.equal(hu.correct('házakban'), true);
++
++  // Bengali through the engine, including decomposed IME input: some
++  // keyboards emit য় as য + nukta and ো as ে + া, which must not turn
++  // real words into spelling errors.
++  const bn = wordEngine('bn-BD', ['মানুষ', 'বই', 'কর', 'দেখ', 'ছেলে', 'শহর']);
++  for (const word of ['মানুষের', 'বইয়ের', 'করছি', 'দেখেছিলাম', 'ছেলেদেরকে', 'শহরে', 'বইগুলোতে']) assert.equal(bn.correct(word), true, word);
++  for (const word of ['মানুসের', 'করক্স', 'বইয়েরর']) assert.equal(bn.correct(word), false, word);
++  assert.equal(bn.correct('বইয়ের'.normalize('NFD')), true, 'decomposed য় still accepted');
++  assert.equal(bn.correct('মানুষের'.normalize('NFD')), true, 'decomposed ে/র still accepted');
++  // A personal word typed in decomposed form matches its canonical spelling.
++  const nfdPersonal = new ProofEngine(null, {}, {});
++  nfdPersonal.configure({packs: [], personal: ['বইয়ের'.normalize('NFD')], language: 'bn-BD'});
++  assert.equal(nfdPersonal.correct('বইয়ের'), true, 'personal entries are normalized');
++});
++
++test('corpus frequency vouches for roots the wordlists miss', () => {
++  const bn = new ProofEngine(null, {}, {frequency: new Map([['কর', 12], ['দেখ', 40]])});
++  bn.configure({language: 'bn-BD'});
++  assert.equal(bn.correct('করছি'), true, 'common root from the frequency list is a valid stem');
++  assert.equal(bn.correct('দেখবেন'), true);
++  assert.equal(bn.correct('করক্স'), false);
++
++  // English keeps its stacked-typo gates: the frequency list alone must not
++  // legitimize "walkeded" through the real word "walked".
++  const en = new ProofEngine(null, {}, {frequency: new Map([['walked', 9]])});
++  en.configure({language: 'en-US'});
++  assert.equal(en.correct('walkeded'), false);
++  assert.equal(en.correct('walkseded'), false);
+ });
+ 
+-test('unknown inflected words fall back to root-form suggestions', () => {
++test('suggestions lead with the main root form', () => {
++  const bn = wordEngine('bn-BD', ['মানুষ', 'বই']);
++  const forStack = bn.suggest('মানুষেরটা');
++  assert.ok(forStack.includes('মানুষ'), 'root form is suggested');
++  const direct = bn.suggest('মানুষের');
++  assert.equal(direct[0], 'মানুষ', 'the main root comes first, before inflected intermediates');
++
+   const tr = wordEngine('tr', ['ev', 'kitap']);
+   assert.ok(tr.suggest('evlerimdeki').includes('ev'), 'root form is suggested');
+   assert.deepEqual(tr.suggest('evxler'), [], 'non-inflectional typos get no root suggestion');
+@@ -158,6 +226,12 @@ test('unknown inflected words fall back to root-form suggestions', () => {
+   assert.ok(ko.suggest('사랑은의').includes('사랑'), 'root form is suggested');
+ });
+ 
++test('ZWJ and ZWNJ stay inside Indic words', () => {
++  const tokens = tokenizeWords('\u0DB8\u0DB1\u0DD4\u0DC2\u0DCA\u200D\u0DBA\u0DBA\u0DCF \u0DC1\u0DD4\u0DB1\u0DCA\u200D\u0DBA\u0DBA\u0DD2').map(t => t.word);
++  assert.deepEqual(tokens, ['\u0DB8\u0DB1\u0DD4\u0DC2\u0DCA\u200D\u0DBA\u0DBA\u0DCF', '\u0DC1\u0DD4\u0DB1\u0DCA\u200D\u0DBA\u0DBA\u0DD2'], 'Sinhala conjuncts with ZWJ are single tokens');
++  assert.equal(tokenizeWords('कार्य\u200Cक्षमता').length, 1, 'Devanagari half form with ZWNJ is one token');
++});
++
+ // --- Engine integration: bundled dictionaries ---
+ 
+ test('bundled dictionaries accept real inflections and still flag typos', () => {
+-- 
+2.47.3
+
